@@ -1,0 +1,104 @@
+{
+  "contents": {
+    "twoColumnWatchNextResults": {
+      "playlist": {
+        "playlist": {
+          "title": "Searle: 3 Philosophy Courses (UC Berkeley)",
+          "playlistId": "PL553DCA4DB88B0408",
+          "ownerName": {
+            "simpleText": "SocioPhilosophy"
+          },
+          "totalVideos": 84,
+          "isInfinite": false,
+          "currentIndex": 1,
+          "contents": [
+            {
+              "playlistPanelVideoRenderer": {
+                "title": {
+                  "simpleText": "Searle: Philosophy of Mind, lecture 1"
+                },
+                "lengthText": {
+                  "simpleText": "1:16:28"
+                },
+                "longBylineText": {
+                  "runs": [
+                    {
+                      "text": "SocioPhilosophy"
+                    }
+                  ]
+                },
+                "indexText": {
+                  "simpleText": "1"
+                },
+                "navigationEndpoint": {
+                  "watchEndpoint": {
+                    "videoId": "zi7Va_4ekko",
+                    "playlistId": "PL553DCA4DB88B0408",
+                    "index": 0
+                  }
+                },
+                "videoId": "zi7Va_4ekko"
+              }
+            },
+            {
+              "playlistPanelVideoRenderer": {
+                "title": {
+                  "simpleText": "Searle: Philosophy of Mind, lecture 2"
+                },
+                "lengthText": {
+                  "simpleText": "1:17:42"
+                },
+                "longBylineText": {
+                  "runs": [
+                    {
+                      "text": "SocioPhilosophy"
+                    }
+                  ]
+                },
+                "indexText": {
+                  "simpleText": "\u25b6"
+                },
+                "navigationEndpoint": {
+                  "watchEndpoint": {
+                    "videoId": "c14ZI80-gPo",
+                    "playlistId": "PL553DCA4DB88B0408",
+                    "index": 1
+                  }
+                },
+                "videoId": "c14ZI80-gPo"
+              }
+            },
+            {
+              "playlistPanelVideoRenderer": {
+                "title": {
+                  "simpleText": "Searle: Philosophy of Mind, lecture 3"
+                },
+                "lengthText": {
+                  "simpleText": "1:15:35"
+                },
+                "longBylineText": {
+                  "runs": [
+                    {
+                      "text": "SocioPhilosophy"
+                    }
+                  ]
+                },
+                "indexText": {
+                  "simpleText": "3"
+                },
+                "navigationEndpoint": {
+                  "watchEndpoint": {
+                    "videoId": "qJ9YQ5IHzrI",
+                    "playlistId": "PL553DCA4DB88B0408",
+                    "index": 2
+                  }
+                },
+                "videoId": "qJ9YQ5IHzrI"
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,13 +1,18 @@
 import type { Playlist, VideoEntry } from '../../model/types'
 
 /**
- * YouTube's current (2026) playlist page renders each row as a
- * `lockupViewModel` inside `itemSectionRenderer.contents[]` — the older
- * `playlistVideoRenderer`/`playlistVideoListRenderer` shape documented in
- * older scraping writeups no longer appears on the live page (confirmed by
- * curling a real playlist; see parse.test.ts fixtureNote). Types below are
- * narrowed just enough to walk that shape; every field read is guarded.
+ * YouTube A/B-serves multiple playlist-row shapes (confirmed live 2026-07-06):
+ * `lockupViewModel` under `sectionListRenderer` on `/playlist?list=` pages,
+ * `playlistPanelVideoRenderer` under `twoColumnWatchNextResults.playlist.playlist`
+ * on `/watch?...&list=` pages, plus the older documented `playlistVideoRenderer`
+ * (`playlistVideoListRenderer`/`richGridRenderer` wrappers) that no live probe has
+ * reproduced but which YouTube's own scraping docs still describe. Rather than
+ * chase fixed wrapper paths, the page is walked as a bounded recursive scan that
+ * collects every row/continuation node in document order, regardless of what
+ * wraps it.
  */
+
+const MAX_SCAN_DEPTH = 25
 
 interface TextRun {
   text: string
@@ -37,6 +42,7 @@ interface WatchEndpoint {
 
 interface LockupViewModel {
   contentId?: string
+  contentType?: string
   contentImage?: {
     thumbnailViewModel?: { overlays?: ThumbnailOverlay[] }
   }
@@ -57,16 +63,23 @@ interface LockupViewModel {
   }
 }
 
-interface ContinuationItemViewModel {
-  continuationCommand?: {
-    innertubeCommand?: { continuationCommand?: { token?: string } }
-  }
+interface PlaylistVideoRenderer {
+  videoId?: string
+  title?: RunsText
+  shortBylineText?: RunsText
+  lengthSeconds?: string
+  index?: RunsText | { simpleText?: string }
+  navigationEndpoint?: { watchEndpoint?: WatchEndpoint }
 }
 
-type SectionItem =
-  | { lockupViewModel: LockupViewModel }
-  | { continuationItemViewModel: ContinuationItemViewModel }
-  | Record<string, unknown>
+interface PlaylistPanelVideoRenderer {
+  videoId?: string
+  title?: RunsText
+  lengthText?: RunsText
+  longBylineText?: RunsText
+  shortBylineText?: RunsText
+  navigationEndpoint?: { watchEndpoint?: WatchEndpoint }
+}
 
 /** Narrows an `unknown` JSON value to a plain object, or returns undefined. */
 function asObject(value: unknown): Record<string, unknown> | undefined {
@@ -152,7 +165,7 @@ export function extractInnertube(html: string): { apiKey: string; context: unkno
 }
 
 /** Reads the duration badge ("1:16:28") off a lockup's thumbnail overlay, if present. */
-function readDurationText(lockup: LockupViewModel): string | undefined {
+function readLockupDurationText(lockup: LockupViewModel): string | undefined {
   const overlays = lockup.contentImage?.thumbnailViewModel?.overlays ?? []
   for (const overlay of overlays) {
     const text = overlay.thumbnailBottomOverlayViewModel?.badges?.[0]?.thumbnailBadgeViewModel?.text
@@ -173,11 +186,15 @@ function parseDurationText(text: string): number | undefined {
 }
 
 /** Reads the channel name off a lockup's first metadata row (uploader byline). */
-function readChannelText(lockup: LockupViewModel): string | undefined {
+function readLockupChannelText(lockup: LockupViewModel): string | undefined {
   const rows =
     lockup.metadata?.lockupMetadataViewModel?.metadata?.contentMetadataViewModel?.metadataRows
   const firstPart = rows?.[0]?.metadataParts?.[0]?.text?.content
   return firstPart || undefined
+}
+
+function readRunsText(field: RunsText | undefined): string | undefined {
+  return field?.runs?.[0]?.text ?? field?.simpleText
 }
 
 /** Converts one `lockupViewModel` playlist row into a VideoEntry, given its 0-based position fallback. */
@@ -191,8 +208,8 @@ function lockupToVideoEntry(
   if (!videoId) return undefined
 
   const title = lockup.metadata?.lockupMetadataViewModel?.title?.content ?? '(untitled video)'
-  const channel = readChannelText(lockup)
-  const durationText = readDurationText(lockup)
+  const channel = readLockupChannelText(lockup)
+  const durationText = readLockupDurationText(lockup)
   const durationSeconds = durationText ? parseDurationText(durationText) : undefined
   const index =
     typeof watchEndpoint?.index === 'number' ? watchEndpoint.index + 1 : fallbackIndex + 1
@@ -207,48 +224,156 @@ function lockupToVideoEntry(
   }
 }
 
-/** Reads the continuation token off a `continuationItemViewModel` section entry, if present. */
-function readContinuationToken(item: ContinuationItemViewModel): string | undefined {
-  return item.continuationCommand?.innertubeCommand?.continuationCommand?.token
+/** Converts one legacy `playlistVideoRenderer` row into a VideoEntry, given its 0-based position fallback. */
+function playlistVideoRendererToVideoEntry(
+  renderer: PlaylistVideoRenderer,
+  fallbackIndex: number,
+): VideoEntry | undefined {
+  const videoId = renderer.videoId ?? renderer.navigationEndpoint?.watchEndpoint?.videoId
+  if (!videoId) return undefined
+
+  const title = readRunsText(renderer.title) ?? '(untitled video)'
+  const channel = readRunsText(renderer.shortBylineText)
+  const durationSeconds = renderer.lengthSeconds ? Number(renderer.lengthSeconds) : undefined
+  const endpointIndex = renderer.navigationEndpoint?.watchEndpoint?.index
+  const textIndex = readRunsText(renderer.index as RunsText | undefined)
+  const parsedTextIndex = textIndex ? Number(textIndex) : undefined
+  const index =
+    typeof endpointIndex === 'number'
+      ? endpointIndex + 1
+      : Number.isFinite(parsedTextIndex)
+        ? (parsedTextIndex as number)
+        : fallbackIndex + 1
+
+  return {
+    videoId,
+    url: `https://www.youtube.com/watch?v=${videoId}`,
+    title,
+    index,
+    ...(channel !== undefined ? { channel } : {}),
+    ...(durationSeconds !== undefined && Number.isFinite(durationSeconds)
+      ? { durationSeconds }
+      : {}),
+  }
 }
 
-/** Walks `sectionListRenderer.contents[]`-shaped items into videos + an optional continuation token. */
-function walkSectionItems(items: unknown[]): { videos: VideoEntry[]; continuation?: string } {
-  const videos: VideoEntry[] = []
-  let continuation: string | undefined
+/** Converts one watch-page `playlistPanelVideoRenderer` row into a VideoEntry, given its 0-based position fallback. */
+function playlistPanelVideoRendererToVideoEntry(
+  renderer: PlaylistPanelVideoRenderer,
+  fallbackIndex: number,
+): VideoEntry | undefined {
+  const watchEndpoint = renderer.navigationEndpoint?.watchEndpoint
+  const videoId = renderer.videoId ?? watchEndpoint?.videoId
+  if (!videoId) return undefined
 
-  for (const raw of items) {
-    const item = asObject(raw) as SectionItem | undefined
-    if (!item) continue
+  const title = readRunsText(renderer.title) ?? '(untitled video)'
+  const channel = readRunsText(renderer.longBylineText) ?? readRunsText(renderer.shortBylineText)
+  const durationText = readRunsText(renderer.lengthText)
+  const durationSeconds = durationText ? parseDurationText(durationText) : undefined
+  const index =
+    typeof watchEndpoint?.index === 'number' ? watchEndpoint.index + 1 : fallbackIndex + 1
 
-    const isr = asObject((item as { itemSectionRenderer?: unknown }).itemSectionRenderer)
-    if (isr) {
-      const nested = asArray(isr.contents) ?? []
-      const result = walkSectionItems(nested)
-      videos.push(...result.videos)
-      if (result.continuation) continuation = result.continuation
-      continue
-    }
+  return {
+    videoId,
+    url: `https://www.youtube.com/watch?v=${videoId}`,
+    title,
+    index,
+    ...(channel !== undefined ? { channel } : {}),
+    ...(durationSeconds !== undefined ? { durationSeconds } : {}),
+  }
+}
 
-    const lockup = asObject((item as { lockupViewModel?: unknown }).lockupViewModel) as
-      | LockupViewModel
-      | undefined
-    if (lockup) {
-      const entry = lockupToVideoEntry(lockup, videos.length)
-      if (entry) videos.push(entry)
-      continue
-    }
+/** True when a `lockupViewModel` node's `contentType` marks it as a video row (vs. a playlist/channel lockup). */
+function isVideoLockup(lockup: LockupViewModel): boolean {
+  return lockup.contentType === undefined || lockup.contentType === 'LOCKUP_CONTENT_TYPE_VIDEO'
+}
 
-    const contItem = asObject(
-      (item as { continuationItemViewModel?: unknown }).continuationItemViewModel,
-    ) as ContinuationItemViewModel | undefined
-    if (contItem) {
-      const token = readContinuationToken(contItem)
-      if (token) continuation = token
-    }
+interface ScanResult {
+  videos: VideoEntry[]
+  continuation?: string
+}
+
+/**
+ * Bounded recursive scan of the `ytInitialData` tree: collects every row node
+ * (`playlistVideoRenderer`, video-typed `lockupViewModel`, `playlistPanelVideoRenderer`,
+ * each optionally wrapped in `richItemRenderer`) plus every continuation token
+ * (`continuationItemRenderer` / `continuationItemViewModel`), in document order.
+ * Depth-capped so a pathological/cyclic-looking structure can't hang the walk.
+ */
+function scanForRows(node: unknown, depth: number, result: ScanResult): void {
+  if (depth > MAX_SCAN_DEPTH) return
+
+  const arr = asArray(node)
+  if (arr) {
+    for (const item of arr) scanForRows(item, depth + 1, result)
+    return
   }
 
-  return { videos, ...(continuation !== undefined ? { continuation } : {}) }
+  const obj = asObject(node)
+  if (!obj) return
+
+  const richItem = asObject(obj.richItemRenderer)
+  if (richItem) {
+    scanForRows(richItem.content, depth + 1, result)
+  }
+
+  const legacyRenderer = asObject(obj.playlistVideoRenderer) as PlaylistVideoRenderer | undefined
+  if (legacyRenderer) {
+    const entry = playlistVideoRendererToVideoEntry(legacyRenderer, result.videos.length)
+    if (entry) result.videos.push(entry)
+  }
+
+  const panelRenderer = asObject(obj.playlistPanelVideoRenderer) as
+    | PlaylistPanelVideoRenderer
+    | undefined
+  if (panelRenderer) {
+    const entry = playlistPanelVideoRendererToVideoEntry(panelRenderer, result.videos.length)
+    if (entry) result.videos.push(entry)
+  }
+
+  const lockup = asObject(obj.lockupViewModel) as LockupViewModel | undefined
+  if (lockup && isVideoLockup(lockup)) {
+    const entry = lockupToVideoEntry(lockup, result.videos.length)
+    if (entry) result.videos.push(entry)
+  }
+
+  const legacyContinuation = asObject(obj.continuationItemRenderer)
+  if (legacyContinuation) {
+    const token = asObject(
+      asObject(legacyContinuation.continuationEndpoint)?.continuationCommand,
+    )?.token
+    if (typeof token === 'string' && token) result.continuation = token
+  }
+
+  const vmContinuation = asObject(obj.continuationItemViewModel)
+  if (vmContinuation) {
+    const token = asObject(
+      asObject(asObject(vmContinuation.continuationCommand)?.innertubeCommand)?.continuationCommand,
+    )?.token
+    if (typeof token === 'string' && token) result.continuation = token
+  }
+
+  // Recurse into every remaining field — rows can be wrapped arbitrarily
+  // deeply (itemSectionRenderer, richGridRenderer, tab/content wrappers).
+  for (const [key, value] of Object.entries(obj)) {
+    if (
+      key === 'richItemRenderer' ||
+      key === 'playlistVideoRenderer' ||
+      key === 'playlistPanelVideoRenderer' ||
+      key === 'lockupViewModel'
+    ) {
+      continue
+    }
+    if (typeof value === 'object' && value !== null) {
+      scanForRows(value, depth + 1, result)
+    }
+  }
+}
+
+function scanTree(node: unknown): ScanResult {
+  const result: ScanResult = { videos: [] }
+  scanForRows(node, 0, result)
+  return result
 }
 
 /** Extracts "84" from a sidebar stats run like `[{text:"84"},{text:" episodes"}]` or a simpleText fallback. */
@@ -282,8 +407,21 @@ function readPlaylistHeaderInfo(data: unknown): PlaylistHeaderInfo {
 
   const info: PlaylistHeaderInfo = {}
 
-  const pageHeaderTitle = asObject(asObject(root.header)?.pageHeaderRenderer)?.pageTitle
+  const headerObj = asObject(root.header)
+  const pageHeaderTitle = asObject(headerObj?.pageHeaderRenderer)?.pageTitle
   if (typeof pageHeaderTitle === 'string' && pageHeaderTitle) info.title = pageHeaderTitle
+
+  const playlistHeaderRenderer = asObject(headerObj?.playlistHeaderRenderer)
+  if (playlistHeaderRenderer) {
+    if (!info.title) {
+      const t = readRunsText(playlistHeaderRenderer.title as RunsText | undefined)
+      if (t) info.title = t
+    }
+    const ownerText = readRunsText(playlistHeaderRenderer.ownerText as RunsText | undefined)
+    if (ownerText) info.channel = ownerText
+    const count = readVideoCountFromStats(playlistHeaderRenderer.stats)
+    if (count !== undefined) info.videoCount = count
+  }
 
   const sidebarItems = asArray(asObject(asObject(root.sidebar)?.playlistSidebarRenderer)?.items)
   for (const raw of sidebarItems ?? []) {
@@ -310,14 +448,34 @@ function readPlaylistHeaderInfo(data: unknown): PlaylistHeaderInfo {
     }
   }
 
+  // Watch-page shape: title/owner/count live on twoColumnWatchNextResults.playlist.playlist.
+  const watchPlaylist = asObject(
+    asObject(asObject(root.contents)?.twoColumnWatchNextResults)?.playlist,
+  )
+  const watchPlaylistInner = asObject(watchPlaylist?.playlist)
+  if (watchPlaylistInner) {
+    if (!info.title && typeof watchPlaylistInner.title === 'string') {
+      info.title = watchPlaylistInner.title
+    }
+    if (!info.channel) {
+      const ownerName = readRunsText(watchPlaylistInner.ownerName as RunsText | undefined)
+      if (ownerName) info.channel = ownerName
+    }
+    if (info.videoCount === undefined && typeof watchPlaylistInner.totalVideos === 'number') {
+      info.videoCount = watchPlaylistInner.totalVideos
+    }
+  }
+
   return info
 }
 
 /**
  * Parses a playlist page's `ytInitialData` into a `Playlist` (first page,
  * up to ~100 videos) plus an optional continuation token for the rest.
- * Defensive by design: once at least one video is found, missing header
- * fields fall back to sensible defaults rather than throwing.
+ * Tolerant of any live row shape (see module doc): once at least one video is
+ * found, missing header fields fall back to sensible defaults rather than
+ * throwing. If the scan finds zero rows, the error lists the top-level
+ * `ytInitialData` keys to help diagnose a future shape drift.
  */
 export function parsePlaylistPage(
   data: unknown,
@@ -328,22 +486,11 @@ export function parsePlaylistPage(
     throw new Error('parsePlaylistPage: expected a JSON object')
   }
 
-  const tabs = asArray(
-    asObject(asObject(asObject(root.contents)?.twoColumnBrowseResultsRenderer))?.tabs,
-  )
-  const tab0 = asObject(tabs?.[0])
-  const tabRenderer = asObject(tab0?.tabRenderer)
-  const sectionListContents = asArray(
-    asObject(asObject(tabRenderer?.content)?.sectionListRenderer)?.contents,
-  )
-
-  if (!sectionListContents) {
-    throw new Error('parsePlaylistPage: could not find sectionListRenderer.contents')
-  }
-
-  const { videos, continuation } = walkSectionItems(sectionListContents)
+  const { videos, continuation } = scanTree(root)
   if (videos.length === 0) {
-    throw new Error('parsePlaylistPage: no videos found in playlist page')
+    throw new Error(
+      `parsePlaylistPage: no videos found in playlist page (top-level keys: ${Object.keys(root).join(', ')})`,
+    )
   }
 
   const header = readPlaylistHeaderInfo(root)
@@ -378,7 +525,7 @@ export function parseContinuation(data: unknown): { videos: VideoEntry[]; contin
     const items = asArray(appendAction?.continuationItems)
     if (!items) continue
 
-    const result = walkSectionItems(items)
+    const result = scanTree(items)
     videos.push(...result.videos)
     if (result.continuation) continuation = result.continuation
   }

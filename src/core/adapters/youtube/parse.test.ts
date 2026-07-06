@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import realFirstPage from './fixture-firstpage.json'
+import realWatchPagePlaylistPanel from './fixture-watchpage-playlistpanel.json'
 import {
   extractInnertube,
   extractYtInitialData,
@@ -131,6 +132,179 @@ describe('parsePlaylistPage (real fixture)', () => {
   })
 })
 
+/**
+ * `realWatchPagePlaylistPanel` is a trimmed `ytInitialData` captured
+ * 2026-07-06 from `https://www.youtube.com/watch?v=c14ZI80-gPo&list=PL553DCA4DB88B0408`
+ * (Shape 2 — the shape a `/watch?...&list=` document uses, as opposed to the
+ * `/playlist?list=` shape above). Rows live at
+ * `contents.twoColumnWatchNextResults.playlist.playlist.contents[]` as
+ * `playlistPanelVideoRenderer`, with NO continuation entry in this playlist's
+ * contents array — completeness is instead signaled by the sibling
+ * `totalVideos`/`isInfinite` fields, matching this parser's tolerance for a
+ * shape with zero continuation nodes.
+ */
+describe('parsePlaylistPage (real watch-page fixture, Shape 2)', () => {
+  it('parses the real 3 trimmed videos from playlistPanelVideoRenderer rows', () => {
+    const { playlist } = parsePlaylistPage(realWatchPagePlaylistPanel, PLAYLIST_ID)
+    expect(playlist.videos).toEqual([
+      {
+        videoId: 'zi7Va_4ekko',
+        url: 'https://www.youtube.com/watch?v=zi7Va_4ekko',
+        title: 'Searle: Philosophy of Mind, lecture 1',
+        channel: 'SocioPhilosophy',
+        durationSeconds: 4588,
+        index: 1,
+      },
+      {
+        videoId: 'c14ZI80-gPo',
+        url: 'https://www.youtube.com/watch?v=c14ZI80-gPo',
+        title: 'Searle: Philosophy of Mind, lecture 2',
+        channel: 'SocioPhilosophy',
+        durationSeconds: 4662,
+        index: 2,
+      },
+      {
+        videoId: 'qJ9YQ5IHzrI',
+        url: 'https://www.youtube.com/watch?v=qJ9YQ5IHzrI',
+        title: 'Searle: Philosophy of Mind, lecture 3',
+        channel: 'SocioPhilosophy',
+        durationSeconds: 4535,
+        index: 3,
+      },
+    ])
+  })
+
+  it('reads the real playlist title/channel/videoCount from twoColumnWatchNextResults.playlist.playlist', () => {
+    const { playlist } = parsePlaylistPage(realWatchPagePlaylistPanel, PLAYLIST_ID)
+    expect(playlist.title).toBe('Searle: 3 Philosophy Courses (UC Berkeley)')
+    expect(playlist.channel).toBe('SocioPhilosophy')
+    expect(playlist.videoCount).toBe(84)
+  })
+
+  it('has no continuation token, matching the real no-continuation-entry shape', () => {
+    const { continuation } = parsePlaylistPage(realWatchPagePlaylistPanel, PLAYLIST_ID)
+    expect(continuation).toBeUndefined()
+  })
+})
+
+/**
+ * The legacy `playlistVideoListRenderer.contents[].playlistVideoRenderer`
+ * shape documented in the design spec (§5.1) and in older YouTube-scraping
+ * writeups. No live probe has reproduced it (see parse.ts module doc), but
+ * it remains a well-documented shape YouTube may still serve to some
+ * account/session cohorts, so the scan keeps a normalizing branch for it.
+ */
+function legacyPlaylistPage(contents: unknown[]) {
+  return {
+    contents: {
+      twoColumnBrowseResultsRenderer: {
+        tabs: [
+          {
+            tabRenderer: {
+              content: {
+                sectionListRenderer: {
+                  contents: [
+                    {
+                      itemSectionRenderer: {
+                        contents: [
+                          {
+                            playlistVideoListRenderer: { contents },
+                          },
+                        ],
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        ],
+      },
+    },
+  }
+}
+
+describe('parsePlaylistPage (legacy playlistVideoRenderer shape)', () => {
+  it('normalizes legacy rows (title.runs, shortBylineText, lengthSeconds, index) into VideoEntry', () => {
+    const data = legacyPlaylistPage([
+      {
+        playlistVideoRenderer: {
+          videoId: 'legacy1',
+          title: { runs: [{ text: 'Legacy Video One' }] },
+          shortBylineText: { runs: [{ text: 'Legacy Channel' }] },
+          lengthSeconds: '125',
+          index: { simpleText: '1' },
+          navigationEndpoint: { watchEndpoint: { videoId: 'legacy1' } },
+        },
+      },
+      {
+        playlistVideoRenderer: {
+          videoId: 'legacy2',
+          title: { runs: [{ text: 'Legacy Video Two' }] },
+          navigationEndpoint: { watchEndpoint: { videoId: 'legacy2', index: 1 } },
+        },
+      },
+    ])
+
+    const { playlist } = parsePlaylistPage(data, 'PLxyz')
+    expect(playlist.videos).toEqual([
+      {
+        videoId: 'legacy1',
+        url: 'https://www.youtube.com/watch?v=legacy1',
+        title: 'Legacy Video One',
+        channel: 'Legacy Channel',
+        durationSeconds: 125,
+        index: 1,
+      },
+      {
+        videoId: 'legacy2',
+        url: 'https://www.youtube.com/watch?v=legacy2',
+        title: 'Legacy Video Two',
+        index: 2,
+      },
+    ])
+  })
+
+  it('also normalizes a richItemRenderer-wrapped legacy row', () => {
+    const data = legacyPlaylistPage([
+      {
+        richItemRenderer: {
+          content: {
+            playlistVideoRenderer: {
+              videoId: 'wrapped1',
+              title: { simpleText: 'Wrapped Video' },
+              navigationEndpoint: { watchEndpoint: { videoId: 'wrapped1', index: 0 } },
+            },
+          },
+        },
+      },
+    ])
+
+    const { playlist } = parsePlaylistPage(data, 'PLxyz')
+    expect(playlist.videos).toEqual([
+      {
+        videoId: 'wrapped1',
+        url: 'https://www.youtube.com/watch?v=wrapped1',
+        title: 'Wrapped Video',
+        index: 1,
+      },
+    ])
+  })
+})
+
+describe('parsePlaylistPage (zero-rows drift diagnostic)', () => {
+  it('lists top-level ytInitialData keys when the scan finds no known row shape', () => {
+    const data = {
+      contents: { someFutureRenderer: { nested: { stuff: [] } } },
+      header: {},
+      trackingParams: 'abc',
+    }
+    expect(() => parsePlaylistPage(data, 'PLxyz')).toThrow(
+      'parsePlaylistPage: no videos found in playlist page (top-level keys: contents, header, trackingParams)',
+    )
+  })
+})
+
 function minimalSectionList(contents: unknown[]) {
   return {
     contents: {
@@ -150,9 +324,9 @@ function minimalSectionList(contents: unknown[]) {
 }
 
 describe('parsePlaylistPage (edge cases)', () => {
-  it('throws when there is no ytInitialData structure at all', () => {
+  it('throws a diagnostic error listing top-level keys when no videos are found at all', () => {
     expect(() => parsePlaylistPage({ unrelated: true }, 'PLxyz')).toThrow(
-      'parsePlaylistPage: could not find sectionListRenderer.contents',
+      'parsePlaylistPage: no videos found in playlist page (top-level keys: unrelated)',
     )
   })
 
