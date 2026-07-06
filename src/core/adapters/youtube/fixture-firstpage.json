@@ -1,0 +1,322 @@
+{
+  "header": {
+    "pageHeaderRenderer": {
+      "pageTitle": "Searle: 3 Philosophy Courses (UC Berkeley)"
+    }
+  },
+  "sidebar": {
+    "playlistSidebarRenderer": {
+      "items": [
+        {
+          "playlistSidebarPrimaryInfoRenderer": {
+            "title": {
+              "runs": [
+                {
+                  "text": "Searle: 3 Philosophy Courses (UC Berkeley)",
+                  "navigationEndpoint": {
+                    "clickTrackingParams": "CAEQk-8CIhMIoauaiaa-lQMVSsA_BB0NrQ6aWhRWTFBMNTUzRENBNERCODhCMDQwOJoBAxD6LMoBBFX63Aw=",
+                    "commandMetadata": {
+                      "webCommandMetadata": {
+                        "url": "/watch?v=zi7Va_4ekko&list=PL553DCA4DB88B0408&pp=iAQBmAUB",
+                        "webPageType": "WEB_PAGE_TYPE_WATCH",
+                        "rootVe": 3832
+                      }
+                    },
+                    "watchEndpoint": {
+                      "videoId": "zi7Va_4ekko",
+                      "playlistId": "PL553DCA4DB88B0408",
+                      "playerParams": "iAQBmAUB",
+                      "loggingContext": {
+                        "vssLoggingContext": {
+                          "serializedContextData": "GhJQTDU1M0RDQTREQjg4QjA0MDg%3D"
+                        }
+                      },
+                      "watchEndpointSupportedOnesieConfig": {
+                        "html5PlaybackOnesieConfig": {
+                          "commonConfig": {
+                            "url": "https://rr3---sn-ab5sznly.googlevideo.com/initplayback?source=youtube&oeis=1&c=WEB&oad=3200&ovd=3200&oaad=11000&oavd=11000&ocs=700&oewis=1&oputc=1&ofpcc=1&msp=1&odepv=1&id=ce2ed56bfe1e924a&ip=147.90.234.201&initcwndbps=121250&mt=1783349101&oweuc=&pxtags=Cg4KAnR4Egg1MTkyOTU2Ng&rxtags=Cg4KAnR4Egg1MTkyOTU2Ng%2CCg4KAnR4Egg1MTkyOTU2Nw%2CCg4KAnR4Egg1MTkyOTU2OA"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "stats": [
+              {
+                "runs": [
+                  {
+                    "text": "84"
+                  },
+                  {
+                    "text": " episodes"
+                  }
+                ]
+              },
+              {
+                "simpleText": "198,893 views"
+              },
+              {
+                "runs": [
+                  {
+                    "text": "Last updated on "
+                  },
+                  {
+                    "text": "Jun 7, 2026"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "playlistSidebarSecondaryInfoRenderer": {
+            "videoOwner": {
+              "videoOwnerRenderer": {
+                "title": {
+                  "runs": [
+                    {
+                      "text": "SocioPhilosophy",
+                      "navigationEndpoint": {
+                        "clickTrackingParams": "CAQQ4TkiEwihq5qJpr6VAxVKwD8EHQ2tDprKAQRV-twM",
+                        "commandMetadata": {
+                          "webCommandMetadata": {
+                            "url": "/@SocioPhilosophy",
+                            "webPageType": "WEB_PAGE_TYPE_CHANNEL",
+                            "rootVe": 3611,
+                            "apiUrl": "/youtubei/v1/browse"
+                          }
+                        },
+                        "browseEndpoint": {
+                          "browseId": "UCktn7c1bHVm5qLF90FmBkzw",
+                          "canonicalBaseUrl": "/@SocioPhilosophy"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "contents": {
+    "twoColumnBrowseResultsRenderer": {
+      "tabs": [
+        {
+          "tabRenderer": {
+            "content": {
+              "sectionListRenderer": {
+                "contents": [
+                  {
+                    "itemSectionRenderer": {
+                      "contents": [
+                        {
+                          "lockupViewModel": {
+                            "contentId": "zi7Va_4ekko",
+                            "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                            "contentImage": {
+                              "thumbnailViewModel": {
+                                "overlays": [
+                                  {
+                                    "thumbnailBottomOverlayViewModel": {
+                                      "badges": [
+                                        {
+                                          "thumbnailBadgeViewModel": {
+                                            "text": "1:16:28"
+                                          }
+                                        }
+                                      ]
+                                    }
+                                  }
+                                ]
+                              }
+                            },
+                            "metadata": {
+                              "lockupMetadataViewModel": {
+                                "title": {
+                                  "content": "Searle: Philosophy of Mind, lecture 1"
+                                },
+                                "metadata": {
+                                  "contentMetadataViewModel": {
+                                    "metadataRows": [
+                                      {
+                                        "metadataParts": [
+                                          {
+                                            "text": {
+                                              "content": "SocioPhilosophy"
+                                            }
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                }
+                              }
+                            },
+                            "rendererContext": {
+                              "commandContext": {
+                                "onTap": {
+                                  "innertubeCommand": {
+                                    "watchEndpoint": {
+                                      "videoId": "zi7Va_4ekko",
+                                      "playlistId": "PL553DCA4DB88B0408",
+                                      "index": 0
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "lockupViewModel": {
+                            "contentId": "c14ZI80-gPo",
+                            "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                            "contentImage": {
+                              "thumbnailViewModel": {
+                                "overlays": [
+                                  {
+                                    "thumbnailBottomOverlayViewModel": {
+                                      "badges": [
+                                        {
+                                          "thumbnailBadgeViewModel": {
+                                            "text": "1:17:42"
+                                          }
+                                        }
+                                      ]
+                                    }
+                                  }
+                                ]
+                              }
+                            },
+                            "metadata": {
+                              "lockupMetadataViewModel": {
+                                "title": {
+                                  "content": "Searle: Philosophy of Mind, lecture 2"
+                                },
+                                "metadata": {
+                                  "contentMetadataViewModel": {
+                                    "metadataRows": [
+                                      {
+                                        "metadataParts": [
+                                          {
+                                            "text": {
+                                              "content": "SocioPhilosophy"
+                                            }
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                }
+                              }
+                            },
+                            "rendererContext": {
+                              "commandContext": {
+                                "onTap": {
+                                  "innertubeCommand": {
+                                    "watchEndpoint": {
+                                      "videoId": "c14ZI80-gPo",
+                                      "playlistId": "PL553DCA4DB88B0408",
+                                      "index": 1
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "lockupViewModel": {
+                            "contentId": "qJ9YQ5IHzrI",
+                            "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                            "contentImage": {
+                              "thumbnailViewModel": {
+                                "overlays": [
+                                  {
+                                    "thumbnailBottomOverlayViewModel": {
+                                      "badges": [
+                                        {
+                                          "thumbnailBadgeViewModel": {
+                                            "text": "1:15:35"
+                                          }
+                                        }
+                                      ]
+                                    }
+                                  }
+                                ]
+                              }
+                            },
+                            "metadata": {
+                              "lockupMetadataViewModel": {
+                                "title": {
+                                  "content": "Searle: Philosophy of Mind, lecture 3"
+                                },
+                                "metadata": {
+                                  "contentMetadataViewModel": {
+                                    "metadataRows": [
+                                      {
+                                        "metadataParts": [
+                                          {
+                                            "text": {
+                                              "content": "SocioPhilosophy"
+                                            }
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                }
+                              }
+                            },
+                            "rendererContext": {
+                              "commandContext": {
+                                "onTap": {
+                                  "innertubeCommand": {
+                                    "watchEndpoint": {
+                                      "videoId": "qJ9YQ5IHzrI",
+                                      "playlistId": "PL553DCA4DB88B0408",
+                                      "index": 2
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "continuationItemViewModel": {
+                      "trigger": "CONTINUATION_TRIGGER_ON_ITEM_SHOWN",
+                      "continuationCommand": {
+                        "innertubeCommand": {
+                          "clickTrackingParams": "CCsQui8iEwihq5qJpr6VAxVKwD8EHQ2tDprKAQRV-twM",
+                          "commandMetadata": {
+                            "webCommandMetadata": {
+                              "sendPost": true,
+                              "apiUrl": "/youtubei/v1/browse"
+                            }
+                          },
+                          "continuationCommand": {
+                            "token": "4qmFsgI7EhRWTFBMNTUzRENBNERCODhCMDQwOBoMa2dFRENMY0w0QXNCmgIUVkxQTDU1M0RDQTREQjg4QjA0MDg%3D",
+                            "request": "CONTINUATION_REQUEST_TYPE_BROWSE"
+                          }
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
