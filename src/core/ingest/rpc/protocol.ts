@@ -105,6 +105,7 @@ export function parseBatchexecuteResponse(text: string, rpcId: string): unknown 
   const body = text.startsWith(ANTI_XSSI_PREFIX) ? text.slice(ANTI_XSSI_PREFIX.length) : text
 
   let lastMatch: string | undefined
+  let sawFrame = false
 
   for (const line of body.split('\n')) {
     const trimmed = line.trim()
@@ -128,13 +129,21 @@ export function parseBatchexecuteResponse(text: string, rpcId: string): unknown 
       if (frame[0] === 'er') {
         throw new Error(`rpc-error: ${JSON.stringify(frame[2])}`)
       }
-      if (frame[0] === 'wrb.fr' && frame[2] !== null && frame[2] !== undefined) {
-        lastMatch = frame[2] as string
+      if (frame[0] === 'wrb.fr') {
+        sawFrame = true
+        if (frame[2] !== null && frame[2] !== undefined) {
+          lastMatch = frame[2] as string
+        }
       }
     }
   }
 
   if (lastMatch === undefined) {
+    // Placeholder-only response (wrb.fr frame with null result, no er) =
+    // server ACCEPTED the call but sent no payload — observed live on izAoDd
+    // adds that did succeed. Treating it as drift makes callers retry and
+    // create duplicate sources.
+    if (sawFrame) return null
     throw new Error(
       `protocol-drift: no wrb.fr frame found for rpcId ${rpcId} in response: ${text.slice(0, 500)}`,
     )

@@ -211,6 +211,12 @@ describe('parseBatchexecuteResponse', () => {
     expect(result).toEqual({ sourceId: 'real' })
   })
 
+  it('returns null for a placeholder-only response (server accepted, no payload)', () => {
+    const text = `)]}'\n${chunk([['wrb.fr', RPC_IDS.addSource, null]])}\n`
+
+    expect(parseBatchexecuteResponse(text, RPC_IDS.addSource)).toBeNull()
+  })
+
   it('throws a distinct rpc-error for an "er" frame matching the rpcId', () => {
     const text = `)]}'\n${chunk([['er', RPC_IDS.addSource, 'QUOTA_EXCEEDED']])}\n`
 
