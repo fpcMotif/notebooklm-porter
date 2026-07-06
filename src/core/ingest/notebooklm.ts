@@ -25,8 +25,12 @@ export interface IngestOutcome {
   error?: string
 }
 
-export async function ingestIntoNotebook(docIds: string[]): Promise<IngestOutcome[]> {
+export async function ingestIntoNotebook(
+  docIds: string[],
+  opts?: { authuser?: number },
+): Promise<IngestOutcome[]> {
   void (docIds satisfies string[])
+  void opts
   throw new Error('not implemented: ingestIntoNotebook (design §4, stage 2)')
 }
 

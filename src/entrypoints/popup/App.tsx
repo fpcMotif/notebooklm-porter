@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'preact/hooks'
 import type { SourceDoc } from '../../core/model/types'
 import { sendMessage } from '../../core/messaging'
+import { DEFAULT_SETTINGS, type PorterSettings } from '../../core/settings'
 
 /**
  * Popup: detect what the active tab offers, one-click capture, then a
@@ -13,6 +14,8 @@ export function App() {
   const [capturable, setCapturable] = useState<string | undefined>()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | undefined>()
+  const [settings, setSettings] = useState<PorterSettings>(DEFAULT_SETTINGS)
+  const [accountsBusy, setAccountsBusy] = useState(false)
 
   useEffect(() => {
     void refresh()
@@ -26,6 +29,8 @@ export function App() {
     }
     const listed = await sendMessage({ type: 'porter/list-docs' })
     if (listed.ok && listed.docs) setDocs(listed.docs)
+    const settingsRes = await sendMessage({ type: 'porter/get-settings' })
+    if (settingsRes.ok && settingsRes.settings) setSettings(settingsRes.settings)
   }
 
   async function capture() {
@@ -42,9 +47,61 @@ export function App() {
     }
   }
 
+  async function refreshAccounts() {
+    setAccountsBusy(true)
+    try {
+      const res = await sendMessage({ type: 'porter/accounts-refresh' })
+      if (res.ok) {
+        const settingsRes = await sendMessage({ type: 'porter/get-settings' })
+        if (settingsRes.ok && settingsRes.settings) setSettings(settingsRes.settings)
+      }
+    } finally {
+      setAccountsBusy(false)
+    }
+  }
+
+  async function selectAccount(authuser: number) {
+    const res = await sendMessage({
+      type: 'porter/update-settings',
+      patch: { nblmAuthuser: authuser },
+    })
+    if (res.ok && res.settings) setSettings(res.settings)
+  }
+
   return (
     <div class="p-4 font-sans text-sm">
-      <h1 class="mb-3 text-base font-semibold">NotebookLM Porter</h1>
+      <h1 class="mb-1 text-base font-semibold">NotebookLM Porter</h1>
+      <div class="mb-3 flex items-center gap-2">
+        {settings.accounts.length > 0 && (
+          <select
+            class="flex-1 rounded border border-gray-200 px-2 py-1 text-sm"
+            value={settings.nblmAuthuser}
+            onChange={(e) => void selectAccount(Number(e.currentTarget.value))}
+          >
+            {settings.accounts.map((account) => (
+              <option key={account.authuser} value={account.authuser}>
+                {account.email}
+              </option>
+            ))}
+          </select>
+        )}
+        <button
+          type="button"
+          class={
+            settings.accounts.length > 0
+              ? 'text-gray-500 disabled:opacity-50'
+              : 'text-blue-600 disabled:opacity-50'
+          }
+          disabled={accountsBusy}
+          onClick={() => void refreshAccounts()}
+        >
+          {accountsBusy
+            ? 'Finding accounts…'
+            : settings.accounts.length > 0
+              ? '↻'
+              : '↻ find accounts'}
+        </button>
+      </div>
       {capturable ? (
         <button
           type="button"

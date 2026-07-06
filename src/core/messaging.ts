@@ -1,4 +1,6 @@
+import type { NblmAccount } from './accounts/parse'
 import type { Capture, SourceDoc } from './model/types'
+import type { PorterSettings } from './settings'
 
 /**
  * Every runtime message in the extension, discriminated on `type`.
@@ -22,9 +24,21 @@ export type PorterMessage =
   | { type: 'porter/export'; docIds: string[]; format: 'markdown' | 'jsonl' }
   /** Popup requests ingest of stored docs into the open NotebookLM notebook. */
   | { type: 'porter/ingest'; docIds: string[] }
+  /** Popup asks the background to re-scan signed-in NotebookLM accounts. */
+  | { type: 'porter/accounts-refresh' }
+  /** Popup reads persisted settings. */
+  | { type: 'porter/get-settings' }
+  /** Popup persists a settings patch. */
+  | { type: 'porter/update-settings'; patch: Partial<PorterSettings> }
 
 export type PorterResponse =
-  | { ok: true; docs?: SourceDoc[]; capturable?: string }
+  | {
+      ok: true
+      docs?: SourceDoc[]
+      capturable?: string
+      settings?: PorterSettings
+      accounts?: NblmAccount[]
+    }
   | { ok: false; error: string }
 
 /** Typed wrapper over runtime.sendMessage. */

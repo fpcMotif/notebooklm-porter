@@ -60,8 +60,28 @@ async function handle(msg: PorterMessage): Promise<PorterResponse> {
     }
     case 'porter/ingest': {
       const { ingestIntoNotebook } = await import('../core/ingest/notebooklm')
-      await ingestIntoNotebook(msg.docIds)
+      const { getSettings } = await import('../core/settings')
+      const settings = await getSettings()
+      await ingestIntoNotebook(msg.docIds, { authuser: settings.nblmAuthuser })
       return { ok: true }
+    }
+    case 'porter/accounts-refresh': {
+      const { discoverAccounts } = await import('../core/accounts/discover')
+      const { getSettings, updateSettings } = await import('../core/settings')
+      const [accounts, current] = await Promise.all([discoverAccounts(), getSettings()])
+      const stillValid = accounts.some((a) => a.authuser === current.nblmAuthuser)
+      const nblmAuthuser = stillValid ? current.nblmAuthuser : (accounts[0]?.authuser ?? 0)
+      await updateSettings({ accounts, nblmAuthuser })
+      return { ok: true, accounts }
+    }
+    case 'porter/get-settings': {
+      const { getSettings } = await import('../core/settings')
+      return { ok: true, settings: await getSettings() }
+    }
+    case 'porter/update-settings': {
+      const { updateSettings } = await import('../core/settings')
+      const settings = await updateSettings(msg.patch)
+      return { ok: true, settings }
     }
   }
 }
