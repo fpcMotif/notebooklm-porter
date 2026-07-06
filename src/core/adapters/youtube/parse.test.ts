@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import realFirstPage from './fixture-firstpage.json'
+import realMixPanel from './fixture-mix-panel.json'
 import realWatchPagePlaylistPanel from './fixture-watchpage-playlistpanel.json'
 import {
   extractInnertube,
@@ -183,6 +184,64 @@ describe('parsePlaylistPage (real watch-page fixture, Shape 2)', () => {
 
   it('has no continuation token, matching the real no-continuation-entry shape', () => {
     const { continuation } = parsePlaylistPage(realWatchPagePlaylistPanel, PLAYLIST_ID)
+    expect(continuation).toBeUndefined()
+  })
+})
+
+/**
+ * `realMixPanel` is a trimmed `ytInitialData` captured 2026-07-06 from
+ * `https://www.youtube.com/watch?v=9UZKYgqcY8U&list=RD9UZKYgqcY8U&start_radio=1`
+ * (a Mix/Radio — `list=RD*` — which has no real `/playlist?list=RD...` page;
+ * only the watch-page panel embeds it). Trimmed to the first 3
+ * `playlistPanelVideoRenderer` rows plus the panel's `title`/`isInfinite`
+ * metadata, all unedited real field values. The real response carried no
+ * `totalVideos` field on an infinite Mix panel (confirmed live), and no
+ * continuation entry in `contents` — a Mix has no "next page", it's endless.
+ */
+describe('parsePlaylistPage (real mix/radio panel fixture)', () => {
+  const MIX_PLAYLIST_ID = 'RD9UZKYgqcY8U'
+
+  it('parses the real 3 trimmed videos from playlistPanelVideoRenderer rows', () => {
+    const { playlist } = parsePlaylistPage(realMixPanel, MIX_PLAYLIST_ID)
+    expect(playlist.videos).toEqual([
+      {
+        videoId: '9UZKYgqcY8U',
+        url: 'https://www.youtube.com/watch?v=9UZKYgqcY8U',
+        title:
+          "260324 KARINA 카리나 - THAT'S A NO NO & RUDE! COVER @KARINA B-DAY PARTY MEMORY BOX IN SEOUL",
+        channel: 'im_chirey',
+        durationSeconds: 63,
+        index: 1,
+      },
+      {
+        videoId: 'ArmDp-zijuc',
+        url: 'https://www.youtube.com/watch?v=ArmDp-zijuc',
+        title: "NewJeans (뉴진스) 'Super Shy' Official MV",
+        channel: 'HYBE LABELS',
+        durationSeconds: 201,
+        index: 2,
+      },
+      {
+        videoId: 'Km71Rr9K-Bw',
+        url: 'https://www.youtube.com/watch?v=Km71Rr9K-Bw',
+        title: "NewJeans (뉴진스) 'Ditto' Performance Video",
+        channel: 'NewJeans',
+        durationSeconds: 190,
+        index: 3,
+      },
+    ])
+  })
+
+  it('prefers the panel title (e.g. "Mix – …") over any header/sidebar title', () => {
+    const { playlist } = parsePlaylistPage(realMixPanel, MIX_PLAYLIST_ID)
+    expect(playlist.title).toBe(
+      "Mix - 260324 KARINA 카리나 - THAT'S A NO NO & RUDE! COVER @KARINA B-DAY PARTY MEMORY BOX IN SEOUL",
+    )
+    expect(playlist.channel).toBe('YouTube')
+  })
+
+  it('has no continuation token because isInfinite forces it undefined', () => {
+    const { continuation } = parsePlaylistPage(realMixPanel, MIX_PLAYLIST_ID)
     expect(continuation).toBeUndefined()
   })
 })

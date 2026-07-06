@@ -8,6 +8,8 @@ export default defineBackground(() => {
     handle(message)
       .then(sendResponse)
       .catch((err: unknown) => {
+        const detail = err instanceof Error && err.stack ? err.stack : err
+        console.error('[porter]', message.type, detail)
         sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) })
       })
     return true

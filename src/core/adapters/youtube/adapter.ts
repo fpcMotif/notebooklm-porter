@@ -1,5 +1,6 @@
 import type { Capture } from '../../model/types'
 import type { Capturable, SourceAdapter } from '../types'
+import { isMixList } from './capture'
 
 export const youtubeAdapter: SourceAdapter = {
   id: 'youtube',
@@ -12,7 +13,10 @@ export const youtubeAdapter: SourceAdapter = {
       return { kind: 'playlist', label: 'Capture this playlist' }
     }
     if (u.pathname === '/watch' && listId) {
-      return { kind: 'playlist', label: "Capture this video's playlist" }
+      const label = isMixList(listId)
+        ? 'Capture this Mix (snapshot)'
+        : "Capture this video's playlist"
+      return { kind: 'playlist', label }
     }
     return null
   },

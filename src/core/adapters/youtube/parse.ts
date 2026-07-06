@@ -398,6 +398,7 @@ interface PlaylistHeaderInfo {
   title?: string
   channel?: string
   videoCount?: number
+  isInfinite?: boolean
 }
 
 /** Best-effort read of playlist title/channel/count from `header` + `sidebar` — several layout variants exist. */
@@ -449,20 +450,24 @@ function readPlaylistHeaderInfo(data: unknown): PlaylistHeaderInfo {
   }
 
   // Watch-page shape: title/owner/count live on twoColumnWatchNextResults.playlist.playlist.
+  // Panel metadata takes precedence over header/sidebar here — a Mix/Radio's
+  // "Mix – …" title only exists on the panel, and isInfinite/totalVideos are
+  // panel-only signals for whether the list is a bounded playlist or endless.
   const watchPlaylist = asObject(
     asObject(asObject(root.contents)?.twoColumnWatchNextResults)?.playlist,
   )
   const watchPlaylistInner = asObject(watchPlaylist?.playlist)
   if (watchPlaylistInner) {
-    if (!info.title && typeof watchPlaylistInner.title === 'string') {
+    if (typeof watchPlaylistInner.title === 'string' && watchPlaylistInner.title) {
       info.title = watchPlaylistInner.title
     }
-    if (!info.channel) {
-      const ownerName = readRunsText(watchPlaylistInner.ownerName as RunsText | undefined)
-      if (ownerName) info.channel = ownerName
-    }
-    if (info.videoCount === undefined && typeof watchPlaylistInner.totalVideos === 'number') {
+    const ownerName = readRunsText(watchPlaylistInner.ownerName as RunsText | undefined)
+    if (ownerName) info.channel = ownerName
+    if (typeof watchPlaylistInner.totalVideos === 'number') {
       info.videoCount = watchPlaylistInner.totalVideos
+    }
+    if (typeof watchPlaylistInner.isInfinite === 'boolean') {
+      info.isInfinite = watchPlaylistInner.isInfinite
     }
   }
 
@@ -494,6 +499,9 @@ export function parsePlaylistPage(
   }
 
   const header = readPlaylistHeaderInfo(root)
+  // isInfinite (Mix/Radio panels) means the list has no real end — a
+  // continuation token found by the scan wouldn't lead anywhere sensible.
+  const effectiveContinuation = header.isInfinite ? undefined : continuation
 
   const playlist: Playlist = {
     playlistId,
@@ -504,7 +512,10 @@ export function parsePlaylistPage(
     ...(header.channel !== undefined ? { channel: header.channel } : {}),
   }
 
-  return { playlist, ...(continuation !== undefined ? { continuation } : {}) }
+  return {
+    playlist,
+    ...(effectiveContinuation !== undefined ? { continuation: effectiveContinuation } : {}),
+  }
 }
 
 /**

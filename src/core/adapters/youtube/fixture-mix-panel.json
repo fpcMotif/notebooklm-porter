@@ -1,0 +1,115 @@
+{
+  "contents": {
+    "twoColumnWatchNextResults": {
+      "playlist": {
+        "playlist": {
+          "title": "Mix - 260324 KARINA 카리나 - THAT'S A NO NO & RUDE! COVER @KARINA B-DAY PARTY MEMORY BOX IN SEOUL",
+          "playlistId": "RD9UZKYgqcY8U",
+          "ownerName": {
+            "simpleText": "YouTube"
+          },
+          "isInfinite": true,
+          "currentIndex": 0,
+          "contents": [
+            {
+              "playlistPanelVideoRenderer": {
+                "title": {
+                  "simpleText": "260324 KARINA 카리나 - THAT'S A NO NO & RUDE! COVER @KARINA B-DAY PARTY MEMORY BOX IN SEOUL"
+                },
+                "lengthText": {
+                  "simpleText": "1:03"
+                },
+                "longBylineText": {
+                  "runs": [
+                    {
+                      "text": "im_chirey"
+                    }
+                  ]
+                },
+                "shortBylineText": {
+                  "runs": [
+                    {
+                      "text": "im_chirey"
+                    }
+                  ]
+                },
+                "navigationEndpoint": {
+                  "watchEndpoint": {
+                    "videoId": "9UZKYgqcY8U",
+                    "playlistId": "RD9UZKYgqcY8U",
+                    "index": 0
+                  }
+                },
+                "videoId": "9UZKYgqcY8U"
+              }
+            },
+            {
+              "playlistPanelVideoRenderer": {
+                "title": {
+                  "simpleText": "NewJeans (뉴진스) 'Super Shy' Official MV"
+                },
+                "lengthText": {
+                  "simpleText": "3:21"
+                },
+                "longBylineText": {
+                  "runs": [
+                    {
+                      "text": "HYBE LABELS"
+                    }
+                  ]
+                },
+                "shortBylineText": {
+                  "runs": [
+                    {
+                      "text": "HYBE LABELS"
+                    }
+                  ]
+                },
+                "navigationEndpoint": {
+                  "watchEndpoint": {
+                    "videoId": "ArmDp-zijuc",
+                    "playlistId": "RD9UZKYgqcY8U",
+                    "index": 1
+                  }
+                },
+                "videoId": "ArmDp-zijuc"
+              }
+            },
+            {
+              "playlistPanelVideoRenderer": {
+                "title": {
+                  "simpleText": "NewJeans (뉴진스) 'Ditto' Performance Video"
+                },
+                "lengthText": {
+                  "simpleText": "3:10"
+                },
+                "longBylineText": {
+                  "runs": [
+                    {
+                      "text": "NewJeans"
+                    }
+                  ]
+                },
+                "shortBylineText": {
+                  "runs": [
+                    {
+                      "text": "NewJeans"
+                    }
+                  ]
+                },
+                "navigationEndpoint": {
+                  "watchEndpoint": {
+                    "videoId": "Km71Rr9K-Bw",
+                    "playlistId": "RD9UZKYgqcY8U",
+                    "index": 2
+                  }
+                },
+                "videoId": "Km71Rr9K-Bw"
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
