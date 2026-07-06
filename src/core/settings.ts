@@ -9,6 +9,8 @@ const KEY = 'porter/settings'
 export interface PorterSettings {
   nblmAuthuser: number
   accounts: NblmAccount[]
+  /** Google OAuth Client ID (Chrome Extension type) for Drive backup. */
+  driveClientId?: string
 }
 
 export const DEFAULT_SETTINGS: PorterSettings = {

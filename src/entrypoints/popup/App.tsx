@@ -16,6 +16,8 @@ export function App() {
   const [error, setError] = useState<string | undefined>()
   const [settings, setSettings] = useState<PorterSettings>(DEFAULT_SETTINGS)
   const [accountsBusy, setAccountsBusy] = useState(false)
+  const [backupBusy, setBackupBusy] = useState(false)
+  const [backupResult, setBackupResult] = useState<{ text: string; isError: boolean } | undefined>()
 
   useEffect(() => {
     void refresh()
@@ -66,6 +68,36 @@ export function App() {
       patch: { nblmAuthuser: authuser },
     })
     if (res.ok && res.settings) setSettings(res.settings)
+  }
+
+  async function updateDriveClientId(driveClientId: string) {
+    const res = await sendMessage({ type: 'porter/update-settings', patch: { driveClientId } })
+    if (res.ok && res.settings) setSettings(res.settings)
+  }
+
+  async function backupToDrive() {
+    setBackupBusy(true)
+    setBackupResult(undefined)
+    try {
+      const res = await sendMessage({
+        type: 'porter/backup-drive',
+        docIds: docs.map((doc) => doc.id),
+      })
+      if (!res.ok) {
+        setBackupResult({ text: res.error, isError: true })
+        return
+      }
+      const outcomes = res.backup ?? []
+      const failed = outcomes.find((o) => !o.ok)
+      const okCount = outcomes.filter((o) => o.ok).length
+      setBackupResult(
+        failed
+          ? { text: failed.error ?? 'Backup failed', isError: true }
+          : { text: `${okCount} backed up to Drive`, isError: false },
+      )
+    } finally {
+      setBackupBusy(false)
+    }
   }
 
   return (
@@ -123,6 +155,41 @@ export function App() {
           </li>
         ))}
       </ul>
+      {docs.length > 0 && (
+        <>
+          <button
+            type="button"
+            class="mt-3 w-full rounded border border-gray-300 px-3 py-2 text-gray-700 disabled:opacity-50"
+            disabled={backupBusy}
+            onClick={() => void backupToDrive()}
+          >
+            {backupBusy ? 'Backing up…' : 'Back up to Drive'}
+          </button>
+          {backupResult && (
+            <p class={`mt-1 text-xs ${backupResult.isError ? 'text-red-600' : 'text-gray-500'}`}>
+              {backupResult.text}
+            </p>
+          )}
+        </>
+      )}
+      <details class="mt-3">
+        <summary class="cursor-pointer text-gray-500">Settings</summary>
+        <div class="mt-2">
+          <label class="mb-1 block text-gray-700" for="drive-client-id">
+            Drive OAuth Client ID
+          </label>
+          <input
+            id="drive-client-id"
+            type="text"
+            class="w-full rounded border border-gray-200 px-2 py-1 text-sm"
+            value={settings.driveClientId ?? ''}
+            onChange={(e) => void updateDriveClientId(e.currentTarget.value)}
+          />
+          <p class="mt-1 text-xs text-gray-400">
+            OAuth client (Chrome Extension type) from Google Cloud Console
+          </p>
+        </div>
+      </details>
     </div>
   )
 }

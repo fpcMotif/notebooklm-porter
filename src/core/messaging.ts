@@ -1,4 +1,5 @@
 import type { NblmAccount } from './accounts/parse'
+import type { BackupOutcome } from './backup/client'
 import type { Capture, SourceDoc } from './model/types'
 import type { PorterSettings } from './settings'
 
@@ -30,6 +31,8 @@ export type PorterMessage =
   | { type: 'porter/get-settings' }
   /** Popup persists a settings patch. */
   | { type: 'porter/update-settings'; patch: Partial<PorterSettings> }
+  /** Popup requests backup of stored docs into the user's Google Drive. */
+  | { type: 'porter/backup-drive'; docIds: string[] }
 
 export type PorterResponse =
   | {
@@ -38,6 +41,7 @@ export type PorterResponse =
       capturable?: string
       settings?: PorterSettings
       accounts?: NblmAccount[]
+      backup?: BackupOutcome[]
     }
   | { ok: false; error: string }
 

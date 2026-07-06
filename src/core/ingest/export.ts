@@ -4,16 +4,11 @@
  * Tier C (design §4): zero ToS/breakage risk, and the automatic destination
  * when Tier A (RPC) and Tier B (DOM) both fail.
  */
+import { sanitizeFilenameBase } from '../filename'
 import type { SourceDoc } from '../model/types'
 import { listDocs } from '../store'
 
 export type ExportFormat = 'markdown' | 'jsonl'
-
-// Path separators + Windows-reserved glyphs, plus non-whitespace C0 control
-// chars and DEL. Tab/newline/CR are handled by the whitespace collapse below
-// instead of being turned into visible hyphens.
-// eslint-disable-next-line no-control-regex
-const FILESYSTEM_HOSTILE = /[/\\:*?"<>|\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g
 
 /**
  * Filesystem-safe download filename for a doc title. Whitespace (including
@@ -25,13 +20,7 @@ const FILESYSTEM_HOSTILE = /[/\\:*?"<>|\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g
  */
 export function exportFilename(title: string, format: ExportFormat): string {
   const ext = format === 'markdown' ? 'md' : 'jsonl'
-  const sanitized = title
-    .replace(/\s+/g, ' ')
-    .replace(FILESYSTEM_HOSTILE, '-')
-    .trim()
-    .slice(0, 120)
-    .trim()
-
+  const sanitized = sanitizeFilenameBase(title, 120)
   const base = sanitized.length > 0 ? sanitized : 'source'
   return `${base}.${ext}`
 }

@@ -39,7 +39,10 @@ Research across the reference repos and the awesome-notebooklm ecosystem (see
 
 - No podcast/RSS/doc-site import (jetpack's turf; not our wedge).
 - No NotebookLM *clone* features (no BYOK chat, no local LLM) — we feed the real product.
-- No account/cloud sync backend in v1. All state is local (`storage.local`).
+- No account/cloud sync *backend* in v1. All state is local (`storage.local`). In scope
+  (v1.5, user-requested): explicit-action **Google Drive backup** of captured sources
+  (OAuth `drive.file`, upload/update into one folder — Drive revisions give version
+  history) and **multi-account NotebookLM** via `?authuser=` on the RPC endpoint.
 - No audio/video *overview* generation — that's NotebookLM's job downstream.
 - No Enterprise API path in v1 (it exists — Discovery Engine `notebooks.sources.batchCreate` —
   but is gated to Google Cloud orgs; consumer users can't use it).

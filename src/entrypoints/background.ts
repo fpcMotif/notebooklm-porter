@@ -83,5 +83,10 @@ async function handle(msg: PorterMessage): Promise<PorterResponse> {
       const settings = await updateSettings(msg.patch)
       return { ok: true, settings }
     }
+    case 'porter/backup-drive': {
+      const { backupDocsToDrive } = await import('../core/backup/client')
+      const backup = await backupDocsToDrive(msg.docIds)
+      return { ok: true, backup }
+    }
   }
 }
