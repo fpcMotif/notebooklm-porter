@@ -64,8 +64,19 @@ async function handle(msg: PorterMessage): Promise<PorterResponse> {
       const { ingestIntoNotebook } = await import('../core/ingest/notebooklm')
       const { getSettings } = await import('../core/settings')
       const settings = await getSettings()
-      await ingestIntoNotebook(msg.docIds, { authuser: settings.nblmAuthuser })
-      return { ok: true }
+      const ingest = await ingestIntoNotebook(msg.docIds, {
+        authuser: settings.nblmAuthuser,
+        notebookId: msg.notebookId,
+      })
+      return { ok: true, ingest }
+    }
+    case 'porter/list-notebooks': {
+      const { fetchSession, listNotebooks } = await import('../core/ingest/rpc/client')
+      const { getSettings } = await import('../core/settings')
+      const settings = await getSettings()
+      const session = await fetchSession(settings.nblmAuthuser)
+      const notebooks = await listNotebooks(session, settings.nblmAuthuser)
+      return { ok: true, notebooks }
     }
     case 'porter/accounts-refresh': {
       const { discoverAccounts } = await import('../core/accounts/discover')

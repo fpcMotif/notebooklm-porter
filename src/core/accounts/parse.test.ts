@@ -3,7 +3,7 @@ import { parseNblmHome } from './parse'
 
 const LOGGED_IN_WITH_OPEP7C = `
 <html><head><script>
-var data = {"SNlM0e":"AF1qip_csrf-token-abc123","oPEP7c":"user@gmail.com","otherKey":"ignored"};
+var data = {"SNlM0e":"AF1qip_csrf-token-abc123","FdrFJe":"-1234567890123456789","oPEP7c":"user@gmail.com","otherKey":"ignored"};
 </script></head></html>
 `
 
@@ -22,12 +22,13 @@ var data = {"someOtherKey":"value","noCsrfHere":true};
 const GARBAGE = `not even html <<<>>> {{{ malformed`
 
 describe('parseNblmHome', () => {
-  it('parses a logged-in page with oPEP7c email', () => {
+  it('parses a logged-in page with oPEP7c email and FdrFJe f.sid', () => {
     const result = parseNblmHome(LOGGED_IN_WITH_OPEP7C)
     expect(result).toEqual({
       loggedIn: true,
       email: 'user@gmail.com',
       csrfToken: 'AF1qip_csrf-token-abc123',
+      fSid: '-1234567890123456789',
     })
   })
 
@@ -38,13 +39,15 @@ describe('parseNblmHome', () => {
       email: 'jane.doe@example.co.uk',
       csrfToken: 'AF1qip_csrf-token-xyz789',
     })
+    expect('fSid' in result).toBe(false)
   })
 
-  it('reports loggedIn false and omits email/csrfToken keys when no SNlM0e is present', () => {
+  it('reports loggedIn false and omits email/csrfToken/fSid keys when no SNlM0e is present', () => {
     const result = parseNblmHome(LOGGED_OUT)
     expect(result).toEqual({ loggedIn: false })
     expect('email' in result).toBe(false)
     expect('csrfToken' in result).toBe(false)
+    expect('fSid' in result).toBe(false)
   })
 
   it('handles garbage HTML without throwing', () => {

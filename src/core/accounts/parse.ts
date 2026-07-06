@@ -1,8 +1,9 @@
 /**
- * Multi-account NotebookLM support hinges on scraping two tokens out of the
- * NBLM homepage HTML per Google account (`?authuser=N`): the CSRF token used
- * to sign RPCs (design §4) and the account's own email, for the account
- * switcher UI. Pure — the caller (background SW) owns the fetch.
+ * Multi-account NotebookLM support hinges on scraping tokens out of the NBLM
+ * homepage HTML per Google account (`?authuser=N`): the CSRF token used to
+ * sign RPCs, the WIZ `f.sid` used to scope them (design §4), and the
+ * account's own email, for the account switcher UI. Pure — the caller
+ * (background SW) owns the fetch.
  */
 export interface NblmAccount {
   authuser: number
@@ -10,6 +11,7 @@ export interface NblmAccount {
 }
 
 const CSRF_RE = /"SNlM0e":"([^"]+)"/
+const FSID_RE = /"FdrFJe":"([^"]+)"/
 const EMAIL_RE = /"oPEP7c":"([^"]+)"/
 const GENERIC_EMAIL_RE = /"([\w.+-]+@[\w-]+(?:\.[\w-]+)+)"/
 
@@ -21,9 +23,12 @@ export function parseNblmHome(html: string): {
   loggedIn: boolean
   email?: string
   csrfToken?: string
+  fSid?: string
 } {
   const csrfMatch = CSRF_RE.exec(html)
   const csrfToken = csrfMatch?.[1]
+
+  const fSid = FSID_RE.exec(html)?.[1]
 
   const email = EMAIL_RE.exec(html)?.[1] ?? GENERIC_EMAIL_RE.exec(html)?.[1]
 
@@ -31,5 +36,6 @@ export function parseNblmHome(html: string): {
     loggedIn: csrfToken !== undefined,
     ...(email !== undefined ? { email } : {}),
     ...(csrfToken !== undefined ? { csrfToken } : {}),
+    ...(fSid !== undefined ? { fSid } : {}),
   }
 }

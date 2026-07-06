@@ -18,9 +18,18 @@ export function App() {
   const [accountsBusy, setAccountsBusy] = useState(false)
   const [backupBusy, setBackupBusy] = useState(false)
   const [backupResult, setBackupResult] = useState<{ text: string; isError: boolean } | undefined>()
+  const [notebooks, setNotebooks] = useState<{ id: string; title: string }[]>([])
+  const [notebooksBusy, setNotebooksBusy] = useState(false)
+  const [notebooksError, setNotebooksError] = useState<string | undefined>()
+  const [selectedNotebookId, setSelectedNotebookId] = useState('')
+  const [ingestBusy, setIngestBusy] = useState(false)
+  const [ingestResult, setIngestResult] = useState<{ text: string; isError: boolean } | undefined>()
 
   useEffect(() => {
     void refresh()
+    // Mount-only refresh — refresh is a plain function redefined each render,
+    // not a reactive dependency; including it would re-run on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   async function refresh() {
@@ -32,7 +41,56 @@ export function App() {
     const listed = await sendMessage({ type: 'porter/list-docs' })
     if (listed.ok && listed.docs) setDocs(listed.docs)
     const settingsRes = await sendMessage({ type: 'porter/get-settings' })
-    if (settingsRes.ok && settingsRes.settings) setSettings(settingsRes.settings)
+    if (settingsRes.ok && settingsRes.settings) {
+      setSettings(settingsRes.settings)
+      if (settingsRes.settings.accounts.length > 0) void loadNotebooks()
+    }
+  }
+
+  async function loadNotebooks() {
+    setNotebooksBusy(true)
+    setNotebooksError(undefined)
+    try {
+      const res = await sendMessage({ type: 'porter/list-notebooks' })
+      if (!res.ok) {
+        setNotebooksError(res.error)
+        return
+      }
+      const list = res.notebooks ?? []
+      setNotebooks(list)
+      if (selectedNotebookId === '' && list.length > 0 && list[0]) {
+        setSelectedNotebookId(list[0].id)
+      }
+    } finally {
+      setNotebooksBusy(false)
+    }
+  }
+
+  async function ingest() {
+    if (selectedNotebookId === '') return
+    setIngestBusy(true)
+    setIngestResult(undefined)
+    try {
+      const res = await sendMessage({
+        type: 'porter/ingest',
+        docIds: docs.map((doc) => doc.id),
+        notebookId: selectedNotebookId,
+      })
+      if (!res.ok) {
+        setIngestResult({ text: res.error, isError: true })
+        return
+      }
+      const outcomes = res.ingest ?? []
+      const failed = outcomes.find((o) => !o.ok)
+      const okCount = outcomes.filter((o) => o.ok).length
+      setIngestResult(
+        failed
+          ? { text: failed.error ?? 'Send to NotebookLM failed', isError: true }
+          : { text: `${okCount} of ${outcomes.length} docs sent`, isError: false },
+      )
+    } finally {
+      setIngestBusy(false)
+    }
   }
 
   async function capture() {
@@ -157,9 +215,49 @@ export function App() {
       </ul>
       {docs.length > 0 && (
         <>
+          {settings.accounts.length > 0 && (
+            <div class="mt-3 flex items-center gap-2">
+              <select
+                class="flex-1 rounded border border-gray-200 px-2 py-1 text-sm"
+                value={selectedNotebookId}
+                onChange={(e) => setSelectedNotebookId(e.currentTarget.value)}
+              >
+                <option value="" disabled>
+                  Choose a notebook…
+                </option>
+                {notebooks.map((notebook) => (
+                  <option key={notebook.id} value={notebook.id}>
+                    {notebook.title}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                class="text-gray-500 disabled:opacity-50"
+                disabled={notebooksBusy}
+                onClick={() => void loadNotebooks()}
+              >
+                {notebooksBusy ? 'Loading…' : '↻'}
+              </button>
+            </div>
+          )}
+          {notebooksError && <p class="mt-1 text-xs text-red-600">{notebooksError}</p>}
           <button
             type="button"
-            class="mt-3 w-full rounded border border-gray-300 px-3 py-2 text-gray-700 disabled:opacity-50"
+            class="mt-2 w-full rounded bg-blue-600 px-3 py-2 text-white disabled:opacity-50"
+            disabled={ingestBusy || selectedNotebookId === ''}
+            onClick={() => void ingest()}
+          >
+            {ingestBusy ? 'Sending…' : 'Send to NotebookLM'}
+          </button>
+          {ingestResult && (
+            <p class={`mt-1 text-xs ${ingestResult.isError ? 'text-red-600' : 'text-gray-500'}`}>
+              {ingestResult.text}
+            </p>
+          )}
+          <button
+            type="button"
+            class="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-gray-700 disabled:opacity-50"
             disabled={backupBusy}
             onClick={() => void backupToDrive()}
           >

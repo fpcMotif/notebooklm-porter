@@ -1,5 +1,6 @@
 import type { NblmAccount } from './accounts/parse'
 import type { BackupOutcome } from './backup/client'
+import type { IngestOutcome } from './ingest/notebooklm'
 import type { Capture, SourceDoc } from './model/types'
 import type { PorterSettings } from './settings'
 
@@ -23,8 +24,10 @@ export type PorterMessage =
   | { type: 'porter/delete-doc'; docId: string }
   /** Popup requests export of stored docs as downloaded files. */
   | { type: 'porter/export'; docIds: string[]; format: 'markdown' | 'jsonl' }
-  /** Popup requests ingest of stored docs into the open NotebookLM notebook. */
-  | { type: 'porter/ingest'; docIds: string[] }
+  /** Popup requests ingest of stored docs into the given NotebookLM notebook. */
+  | { type: 'porter/ingest'; docIds: string[]; notebookId: string }
+  /** Popup asks the background to list notebooks in the active NBLM account. */
+  | { type: 'porter/list-notebooks' }
   /** Popup asks the background to re-scan signed-in NotebookLM accounts. */
   | { type: 'porter/accounts-refresh' }
   /** Popup reads persisted settings. */
@@ -42,6 +45,8 @@ export type PorterResponse =
       settings?: PorterSettings
       accounts?: NblmAccount[]
       backup?: BackupOutcome[]
+      notebooks?: { id: string; title: string }[]
+      ingest?: IngestOutcome[]
     }
   | { ok: false; error: string }
 
