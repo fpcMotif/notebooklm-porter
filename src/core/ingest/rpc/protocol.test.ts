@@ -243,6 +243,20 @@ describe('parseBatchexecuteResponse', () => {
 })
 
 describe('parseNotebookList', () => {
+  it('unwraps the live wXbhsf shape where rows are nested at result[0]', () => {
+    const result = [
+      [
+        ['Searle: Philosophy of Mind, lecture 1', null, 'f6cd42fa-89e0-499c-ab21-eb526475f82b'],
+        ['Topology: A Categorical Approach', null, 'b95181bf-afc8-4c03-8795-8f72b98c4df4'],
+      ],
+      null,
+    ]
+    expect(parseNotebookList(result)).toEqual([
+      { id: 'f6cd42fa-89e0-499c-ab21-eb526475f82b', title: 'Searle: Philosophy of Mind, lecture 1' },
+      { id: 'b95181bf-afc8-4c03-8795-8f72b98c4df4', title: 'Topology: A Categorical Approach' },
+    ])
+  })
+
   it('maps title (index 0) and notebookId (index 2) per row', () => {
     const result = [
       ['My Notebook', null, 'nb-1'],

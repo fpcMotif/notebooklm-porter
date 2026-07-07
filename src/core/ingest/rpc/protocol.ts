@@ -156,12 +156,23 @@ export function parseBatchexecuteResponse(text: string, rpcId: string): unknown 
   }
 }
 
-/** Skips malformed rows (missing id/title) rather than throwing on a partial list. */
+/**
+ * Skips malformed rows (missing id/title) rather than throwing on a partial
+ * list. Live wXbhsf responses nest the rows one level down (`result[0]`);
+ * some fixtures/back-ends return the rows array directly — accept both.
+ */
 export function parseNotebookList(result: unknown): { id: string; title: string }[] {
-  if (!Array.isArray(result)) return []
+  const direct = notebookRows(result)
+  if (direct.length > 0) return direct
+  if (Array.isArray(result)) return notebookRows(result[0])
+  return []
+}
+
+function notebookRows(rows: unknown): { id: string; title: string }[] {
+  if (!Array.isArray(rows)) return []
 
   const notebooks: { id: string; title: string }[] = []
-  for (const row of result) {
+  for (const row of rows) {
     if (!Array.isArray(row)) continue
     const title = row[0]
     const id = row[2]
