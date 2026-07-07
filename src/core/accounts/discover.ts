@@ -1,3 +1,4 @@
+import { dbg } from '../debug'
 import { homeUrl } from '../ingest/rpc/protocol'
 import { parseNblmHome, type NblmAccount } from './parse'
 
@@ -17,6 +18,11 @@ export async function discoverAccounts(max = 5): Promise<NblmAccount[]> {
     // eslint-disable-next-line no-await-in-loop
     const html = await res.text()
     const parsed = parseNblmHome(html)
+    dbg('accounts', 'probe', {
+      authuser,
+      loggedIn: parsed.loggedIn,
+      ...(parsed.email !== undefined ? { email: parsed.email } : {}),
+    })
     if (!parsed.loggedIn) break
     accounts.push({ authuser, email: parsed.email ?? '' })
   }

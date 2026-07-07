@@ -1,5 +1,6 @@
 import type { NblmAccount } from './accounts/parse'
 import type { BackupOutcome } from './backup/client'
+import type { DebugEntry } from './debug'
 import type { IngestOutcome } from './ingest/notebooklm'
 import type { Capture, SourceDoc } from './model/types'
 import type { PorterSettings } from './settings'
@@ -36,6 +37,10 @@ export type PorterMessage =
   | { type: 'porter/update-settings'; patch: Partial<PorterSettings> }
   /** Popup requests backup of stored docs into the user's Google Drive. */
   | { type: 'porter/backup-drive'; docIds: string[] }
+  /** Popup reads the persisted SW debug ring (SW console isn't reachable from the popup). */
+  | { type: 'porter/debug-log' }
+  /** Popup clears the persisted SW debug ring. */
+  | { type: 'porter/debug-clear' }
 
 export type PorterResponse =
   | {
@@ -47,6 +52,7 @@ export type PorterResponse =
       backup?: BackupOutcome[]
       notebooks?: { id: string; title: string }[]
       ingest?: IngestOutcome[]
+      debugLog?: DebugEntry[]
     }
   | { ok: false; error: string }
 

@@ -15,6 +15,7 @@ import {
   parseAuthRedirect,
   type DriveRequest,
 } from './drive'
+import { dbg } from '../debug'
 import { getSettings } from '../settings'
 import { listDocs } from '../store'
 
@@ -67,11 +68,15 @@ async function authenticate(clientId: string): Promise<string> {
 async function findOrCreateFolder(token: string): Promise<string> {
   const existing = await listFiles(buildFindFolderRequest(token, BACKUP_FOLDER_NAME))
   const found = existing[0]
-  if (found !== undefined) return found.id
+  if (found !== undefined) {
+    dbg('drive', 'folder', { outcome: 'found', id: found.id })
+    return found.id
+  }
 
   const created = (await driveFetch(buildCreateFolderRequest(token, BACKUP_FOLDER_NAME))) as {
     id: string
   }
+  dbg('drive', 'folder', { outcome: 'created', id: created.id })
   return created.id
 }
 
@@ -120,13 +125,17 @@ async function backupOne(
     const found = existing[0]
     if (found !== undefined) {
       await driveFetch(buildUpdateFileRequest(token, found.id, content))
+      dbg('drive', 'upload', { docId, outcome: 'updated', id: found.id })
     } else {
       await driveFetch(
         buildCreateFileRequest(token, { name, folderId, content, boundary: crypto.randomUUID() }),
       )
+      dbg('drive', 'upload', { docId, outcome: 'created' })
     }
     return { docId, ok: true }
   } catch (err) {
-    return { docId, ok: false, error: err instanceof Error ? err.message : String(err) }
+    const message = err instanceof Error ? err.message : String(err)
+    dbg('drive', 'upload', { docId, outcome: 'failed', error: message })
+    return { docId, ok: false, error: message }
   }
 }

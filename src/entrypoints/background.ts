@@ -1,4 +1,5 @@
 import { adapterForUrl } from '../core/adapters/registry'
+import { dbg } from '../core/debug'
 import { isPorterMessage, type PorterMessage, type PorterResponse } from '../core/messaging'
 import { deleteDoc, listDocs, upsertDoc } from '../core/store'
 
@@ -10,6 +11,10 @@ export default defineBackground(() => {
       .catch((err: unknown) => {
         const detail = err instanceof Error && err.stack ? err.stack : err
         console.error('[porter]', message.type, detail)
+        dbg('bg', `${message.type} failed`, {
+          error: String(err),
+          ...(err instanceof Error && err.stack !== undefined ? { stack: err.stack } : {}),
+        })
         sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) })
       })
     return true
@@ -100,6 +105,15 @@ async function handle(msg: PorterMessage): Promise<PorterResponse> {
       const { backupDocsToDrive } = await import('../core/backup/client')
       const backup = await backupDocsToDrive(msg.docIds)
       return { ok: true, backup }
+    }
+    case 'porter/debug-log': {
+      const { getDebugLog } = await import('../core/debug')
+      return { ok: true, debugLog: await getDebugLog() }
+    }
+    case 'porter/debug-clear': {
+      const { clearDebugLog } = await import('../core/debug')
+      await clearDebugLog()
+      return { ok: true }
     }
   }
 }

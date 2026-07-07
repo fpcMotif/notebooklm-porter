@@ -6,6 +6,7 @@
  * glue, business logic stays in the pure/tested layer).
  */
 import { parseNblmHome } from '../../accounts/parse'
+import { dbg, redact } from '../../debug'
 import {
   addTextSourceParams,
   addUrlSourceParams,
@@ -33,6 +34,12 @@ export async function fetchSession(authuser: number): Promise<NblmSession> {
   const res = await fetch(homeUrl(authuser), { credentials: 'include' })
   const html = await res.text()
   const parsed = parseNblmHome(html)
+  dbg('rpc', 'session', {
+    authuser,
+    loggedIn: parsed.loggedIn,
+    hasCsrf: parsed.csrfToken !== undefined,
+    hasFsid: parsed.fSid !== undefined,
+  })
   if (!parsed.loggedIn || parsed.csrfToken === undefined) {
     throw new Error('not-logged-in: open notebooklm.google.com and sign in')
   }
@@ -55,17 +62,40 @@ export async function rpcCall(
     ...(session.fSid !== undefined ? { fSid: session.fSid } : {}),
     ...(sourcePath !== undefined ? { sourcePath } : {}),
   })
-  const res = await fetch(url, {
-    method: 'POST',
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
-    body: buildEnvelope(rpcId, params, session.csrfToken),
-  })
-  if (!res.ok) {
-    throw new Error(`rpc-http-error: ${res.status} ${res.statusText}`)
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+      body: buildEnvelope(rpcId, params, session.csrfToken),
+    })
+    if (!res.ok) {
+      throw new Error(`rpc-http-error: ${res.status} ${res.statusText}`)
+    }
+    const text = await res.text()
+    try {
+      const result = parseBatchexecuteResponse(text, rpcId)
+      dbg('rpc', rpcId, {
+        url: redact(url),
+        status: res.status,
+        ok: res.ok,
+        resultKind: result === null ? 'placeholder-null' : 'payload',
+      })
+      return result
+    } catch (parseErr) {
+      dbg('rpc', rpcId, {
+        url: redact(url),
+        status: res.status,
+        ok: res.ok,
+        resultKind: 'placeholder-null',
+        responseHead: text.slice(0, 300),
+      })
+      throw parseErr
+    }
+  } catch (err) {
+    dbg('rpc', `${rpcId} failed`, { error: String(err) })
+    throw err
   }
-  const text = await res.text()
-  return parseBatchexecuteResponse(text, rpcId)
 }
 
 export async function listNotebooks(

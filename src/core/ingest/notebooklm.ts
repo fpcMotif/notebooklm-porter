@@ -1,3 +1,4 @@
+import { dbg } from '../debug'
 import type { SourceDoc } from '../model/types'
 import { addTextSource, addYoutubeSource, fetchSession, type NblmSession } from './rpc/client'
 import { listDocs } from '../store'
@@ -55,6 +56,7 @@ async function ingestOneDoc(
 ): Promise<IngestOutcome> {
   if (doc.kind === 'playlist') {
     const urls = videoUrlsForDoc(doc)
+    dbg('ingest', doc.id, { kind: doc.kind, sources: urls.length })
     for (const url of urls) {
       try {
         // Sequential by necessity: NBLM's add-source RPC must not be
@@ -64,17 +66,20 @@ async function ingestOneDoc(
         await addYoutubeSource(notebookId, url, session, authuser)
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
+        dbg('ingest', `${doc.id} failed`, { error: message })
         return { docId: doc.id, ok: false, tier: 'rpc', error: `${url}: ${message}` }
       }
     }
     return { docId: doc.id, ok: true, tier: 'rpc' }
   }
 
+  dbg('ingest', doc.id, { kind: doc.kind, sources: 1 })
   try {
     await addTextSource(notebookId, doc.title, doc.markdown, session, authuser)
     return { docId: doc.id, ok: true, tier: 'rpc' }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
+    dbg('ingest', `${doc.id} failed`, { error: message })
     return { docId: doc.id, ok: false, tier: 'rpc', error: message }
   }
 }

@@ -9,6 +9,11 @@ import { DEFAULT_SETTINGS, type PorterSettings } from '../../core/settings'
  *
  * TODO(codegen): full UI per docs/superpowers/specs design §Popup.
  */
+
+async function clearDebugLog() {
+  await sendMessage({ type: 'porter/debug-clear' })
+}
+
 export function App() {
   const [docs, setDocs] = useState<SourceDoc[]>([])
   const [capturable, setCapturable] = useState<string | undefined>()
@@ -24,6 +29,7 @@ export function App() {
   const [selectedNotebookId, setSelectedNotebookId] = useState('')
   const [ingestBusy, setIngestBusy] = useState(false)
   const [ingestResult, setIngestResult] = useState<{ text: string; isError: boolean } | undefined>()
+  const [debugCopyStatus, setDebugCopyStatus] = useState<string | undefined>()
 
   useEffect(() => {
     void refresh()
@@ -158,6 +164,18 @@ export function App() {
     }
   }
 
+  async function copyDebugLog() {
+    const res = await sendMessage({ type: 'porter/debug-log' })
+    if (!res.ok) {
+      setDebugCopyStatus(res.error)
+    } else {
+      const entries = res.debugLog ?? []
+      await navigator.clipboard.writeText(JSON.stringify(entries, null, 2))
+      setDebugCopyStatus(`copied (${entries.length} entries)`)
+    }
+    setTimeout(() => setDebugCopyStatus(undefined), 2000)
+  }
+
   return (
     <div class="p-4 font-sans text-sm">
       <h1 class="mb-1 text-base font-semibold">NotebookLM Porter</h1>
@@ -286,6 +304,19 @@ export function App() {
           <p class="mt-1 text-xs text-gray-400">
             OAuth client (Chrome Extension type) from Google Cloud Console
           </p>
+          <div class="mt-3 flex items-center gap-2">
+            <button
+              type="button"
+              class="rounded border border-gray-300 px-2 py-1 text-gray-700"
+              onClick={() => void copyDebugLog()}
+            >
+              Copy debug log
+            </button>
+            <button type="button" class="text-gray-500" onClick={() => void clearDebugLog()}>
+              Clear
+            </button>
+            {debugCopyStatus && <span class="text-xs text-gray-400">{debugCopyStatus}</span>}
+          </div>
         </div>
       </details>
     </div>

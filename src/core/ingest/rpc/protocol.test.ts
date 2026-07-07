@@ -252,7 +252,10 @@ describe('parseNotebookList', () => {
       null,
     ]
     expect(parseNotebookList(result)).toEqual([
-      { id: 'f6cd42fa-89e0-499c-ab21-eb526475f82b', title: 'Searle: Philosophy of Mind, lecture 1' },
+      {
+        id: 'f6cd42fa-89e0-499c-ab21-eb526475f82b',
+        title: 'Searle: Philosophy of Mind, lecture 1',
+      },
       { id: 'b95181bf-afc8-4c03-8795-8f72b98c4df4', title: 'Topology: A Categorical Approach' },
     ])
   })
