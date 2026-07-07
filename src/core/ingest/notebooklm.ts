@@ -1,7 +1,16 @@
-import { dbg } from '../debug'
+import { Effect, Result } from 'effect'
 import type { SourceDoc } from '../model/types'
-import { addTextSource, addYoutubeSource, fetchSession, type NblmSession } from './rpc/client'
+import type {
+  FetchError,
+  HttpStatusError,
+  NotLoggedIn,
+  ProtocolDrift,
+  RpcRefused,
+  StorageError,
+} from '../fx/errors'
+import { DebugLog, Http, Kv } from '../fx/services'
 import { listDocs } from '../store'
+import { addTextSource, addYoutubeSource, fetchSession, type NblmSession } from './rpc/client'
 
 /**
  * Deliver docs into the user's chosen NotebookLM notebook, RPC-first with
@@ -48,65 +57,76 @@ function videoUrlsForDoc(doc: SourceDoc): string[] {
   return Array.from(new Set(matches))
 }
 
-async function ingestOneDoc(
+function ingestOneDoc(
   doc: SourceDoc,
   notebookId: string,
   session: NblmSession,
   authuser: number,
-): Promise<IngestOutcome> {
-  if (doc.kind === 'playlist') {
-    const urls = videoUrlsForDoc(doc)
-    dbg('ingest', doc.id, { kind: doc.kind, sources: urls.length })
-    for (const url of urls) {
-      try {
-        // Sequential by necessity: NBLM's add-source RPC must not be
-        // fired concurrently per notebook, so this can't become a
-        // Promise.all — see design §4.
-        // eslint-disable-next-line no-await-in-loop
-        await addYoutubeSource(notebookId, url, session, authuser)
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        dbg('ingest', `${doc.id} failed`, { error: message })
-        return { docId: doc.id, ok: false, tier: 'rpc', error: `${url}: ${message}` }
-      }
-    }
-    return { docId: doc.id, ok: true, tier: 'rpc' }
-  }
+): Effect.Effect<IngestOutcome, never, Http | DebugLog> {
+  return Effect.gen(function* () {
+    const debugLog = yield* DebugLog
 
-  dbg('ingest', doc.id, { kind: doc.kind, sources: 1 })
-  try {
-    await addTextSource(notebookId, doc.title, doc.markdown, session, authuser)
-    return { docId: doc.id, ok: true, tier: 'rpc' }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    dbg('ingest', `${doc.id} failed`, { error: message })
-    return { docId: doc.id, ok: false, tier: 'rpc', error: message }
-  }
+    if (doc.kind === 'playlist') {
+      const urls = videoUrlsForDoc(doc)
+      yield* debugLog.log('ingest', doc.id, { kind: doc.kind, sources: urls.length })
+      for (const url of urls) {
+        // Sequential by necessity: NBLM's add-source RPC must not be
+        // fired concurrently per notebook, so this can't become
+        // Effect.all-in-parallel — see design §4.
+        const result = yield* Effect.result(addYoutubeSource(notebookId, url, session, authuser))
+        if (Result.isFailure(result)) {
+          const message = String(result.failure)
+          yield* debugLog.log('ingest', `${doc.id} failed`, { error: message })
+          return { docId: doc.id, ok: false, tier: 'rpc' as const, error: `${url}: ${message}` }
+        }
+      }
+      return { docId: doc.id, ok: true, tier: 'rpc' as const }
+    }
+
+    yield* debugLog.log('ingest', doc.id, { kind: doc.kind, sources: 1 })
+    const result = yield* Effect.result(
+      addTextSource(notebookId, doc.title, doc.markdown, session, authuser),
+    )
+    if (Result.isFailure(result)) {
+      const message = String(result.failure)
+      yield* debugLog.log('ingest', `${doc.id} failed`, { error: message })
+      return { docId: doc.id, ok: false, tier: 'rpc' as const, error: message }
+    }
+    return { docId: doc.id, ok: true, tier: 'rpc' as const }
+  })
 }
 
-export async function ingestIntoNotebook(
+export function ingestIntoNotebook(
   docIds: string[],
   opts: { authuser?: number; notebookId: string },
-): Promise<IngestOutcome[]> {
-  const authuser = opts.authuser ?? 0
-  const session = await fetchSession(authuser)
+): Effect.Effect<
+  IngestOutcome[],
+  FetchError | HttpStatusError | NotLoggedIn | ProtocolDrift | RpcRefused | StorageError,
+  Http | Kv | DebugLog
+> {
+  return Effect.gen(function* () {
+    const authuser = opts.authuser ?? 0
 
-  const docs = await listDocs()
-  const byId = new Map(docs.map((doc) => [doc.id, doc]))
+    // Session/store failures propagate untouched so background.ts's
+    // toFriendlyError (NotLoggedIn, ProtocolDrift, etc.) can map them —
+    // only per-doc RPC failures below get stringified into IngestOutcome.
+    const session = yield* fetchSession(authuser)
+    const docs = yield* listDocs()
+    const byId = new Map(docs.map((doc) => [doc.id, doc]))
 
-  const outcomes: IngestOutcome[] = []
-  for (const docId of docIds) {
-    const doc = byId.get(docId)
-    if (doc === undefined) {
-      outcomes.push({ docId, ok: false, tier: 'rpc', error: 'Doc not found' })
-      continue
+    const outcomes: IngestOutcome[] = []
+    for (const docId of docIds) {
+      const doc = byId.get(docId)
+      if (doc === undefined) {
+        outcomes.push({ docId, ok: false, tier: 'rpc', error: 'Doc not found' })
+        continue
+      }
+      // Sequential by necessity: ingest runs against one shared NBLM session
+      // and notebook, and callers rely on outcome order matching docIds.
+      outcomes.push(yield* ingestOneDoc(doc, opts.notebookId, session, authuser))
     }
-    // Sequential by necessity: ingest runs against one shared NBLM session
-    // and notebook, and callers rely on outcome order matching docIds.
-    // eslint-disable-next-line no-await-in-loop
-    outcomes.push(await ingestOneDoc(doc, opts.notebookId, session, authuser))
-  }
-  return outcomes
+    return outcomes
+  })
 }
 
 /** Render helper kept here so callers never import a doc's Thread — only the SourceDoc. */

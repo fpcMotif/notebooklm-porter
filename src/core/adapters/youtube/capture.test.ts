@@ -1,4 +1,7 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { assert, describe, it } from '@effect/vitest'
+import { Effect, Layer, Result } from 'effect'
+import { HttpStatusError } from '../../fx/errors'
+import { Http } from '../../fx/services'
 import { capturePlaylist, isMixList } from './capture'
 import realMixPanel from './fixture-mix-panel.json'
 
@@ -8,78 +11,99 @@ function htmlWithInitialData(data: unknown): string {
   </script></body></html>`
 }
 
-function mockFetchText(html: string, ok = true, status = 200) {
-  const fetchMock = vi.fn<(url: string, init?: unknown) => Promise<Response>>(
-    async () =>
-      ({
-        ok,
-        status,
-        text: async () => html,
-      }) as unknown as Response,
+function makeHttpLayer(html: string, opts: { fail?: boolean } = {}) {
+  const calls: string[] = []
+  const layer = Layer.succeed(
+    Http,
+    Http.of({
+      text: (url: string) => {
+        calls.push(url)
+        if (opts.fail) {
+          return Effect.fail(new HttpStatusError({ url, status: 500 }))
+        }
+        return Effect.succeed(html)
+      },
+      json: () => Effect.die('unused in this test'),
+    }),
   )
-  vi.stubGlobal('fetch', fetchMock)
-  return fetchMock
+  return { layer, calls }
 }
-
-afterEach(() => {
-  vi.unstubAllGlobals()
-})
 
 describe('isMixList', () => {
   it('treats RD-prefixed ids as mixes', () => {
-    expect(isMixList('RD9UZKYgqcY8U')).toBe(true)
+    assert.isTrue(isMixList('RD9UZKYgqcY8U'))
   })
 
   it('treats UL-prefixed ids as mixes', () => {
-    expect(isMixList('ULabc123')).toBe(true)
+    assert.isTrue(isMixList('ULabc123'))
   })
 
   it('treats other prefixes (PL, OLAK) as non-mixes', () => {
-    expect(isMixList('PL553DCA4DB88B0408')).toBe(false)
-    expect(isMixList('OLAK5uy_abc')).toBe(false)
+    assert.isFalse(isMixList('PL553DCA4DB88B0408'))
+    assert.isFalse(isMixList('OLAK5uy_abc'))
   })
 })
 
 describe('capturePlaylist (mix branch)', () => {
   const MIX_URL = 'https://www.youtube.com/watch?v=9UZKYgqcY8U&list=RD9UZKYgqcY8U&start_radio=1'
 
-  it('fetches the cleaned original watch URL, stripping non-v/list params', async () => {
-    const fetchMock = mockFetchText(htmlWithInitialData(realMixPanel))
-    await capturePlaylist(MIX_URL)
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-    const calledUrl = fetchMock.mock.calls[0]?.[0]
-    expect(calledUrl).toBe('https://www.youtube.com/watch?v=9UZKYgqcY8U&list=RD9UZKYgqcY8U')
-  })
+  it.effect('fetches the cleaned original watch URL, stripping non-v/list params', () =>
+    Effect.gen(function* () {
+      const { layer, calls } = makeHttpLayer(htmlWithInitialData(realMixPanel))
+      yield* capturePlaylist(MIX_URL).pipe(Effect.provide(layer))
+      assert.deepStrictEqual(calls, [
+        'https://www.youtube.com/watch?v=9UZKYgqcY8U&list=RD9UZKYgqcY8U',
+      ])
+    }),
+  )
 
-  it('parses the panel videos and sets playlist.url to the cleaned watch URL', async () => {
-    mockFetchText(htmlWithInitialData(realMixPanel))
-    const capture = await capturePlaylist(MIX_URL)
-    expect(capture.kind).toBe('playlist')
-    const playlist = capture.kind === 'playlist' ? capture.playlist : undefined
-    expect(playlist?.videos).toHaveLength(3)
-    expect(playlist?.url).toBe('https://www.youtube.com/watch?v=9UZKYgqcY8U&list=RD9UZKYgqcY8U')
-    expect(playlist?.title).toBe(
-      "Mix - 260324 KARINA 카리나 - THAT'S A NO NO & RUDE! COVER @KARINA B-DAY PARTY MEMORY BOX IN SEOUL",
-    )
-  })
+  it.effect('parses the panel videos and sets playlist.url to the cleaned watch URL', () =>
+    Effect.gen(function* () {
+      const { layer } = makeHttpLayer(htmlWithInitialData(realMixPanel))
+      const capture = yield* capturePlaylist(MIX_URL).pipe(Effect.provide(layer))
+      assert.strictEqual(capture.kind, 'playlist')
+      const playlist = capture.kind === 'playlist' ? capture.playlist : undefined
+      assert.strictEqual(playlist?.videos.length, 3)
+      assert.strictEqual(
+        playlist?.url,
+        'https://www.youtube.com/watch?v=9UZKYgqcY8U&list=RD9UZKYgqcY8U',
+      )
+      assert.strictEqual(
+        playlist?.title,
+        "Mix - 260324 KARINA 카리나 - THAT'S A NO NO & RUDE! COVER @KARINA B-DAY PARTY MEMORY BOX IN SEOUL",
+      )
+    }),
+  )
 
-  it('always forces truncated: true for a mix snapshot', async () => {
-    mockFetchText(htmlWithInitialData(realMixPanel))
-    const capture = await capturePlaylist(MIX_URL)
-    const playlist = capture.kind === 'playlist' ? capture.playlist : undefined
-    expect(playlist?.truncated).toBe(true)
-  })
+  it.effect('always forces truncated: true for a mix snapshot', () =>
+    Effect.gen(function* () {
+      const { layer } = makeHttpLayer(htmlWithInitialData(realMixPanel))
+      const capture = yield* capturePlaylist(MIX_URL).pipe(Effect.provide(layer))
+      const playlist = capture.kind === 'playlist' ? capture.playlist : undefined
+      assert.strictEqual(playlist?.truncated, true)
+    }),
+  )
 
-  it('does not attempt a continuation fetch for a mix (only one fetch call total)', async () => {
-    const fetchMock = mockFetchText(htmlWithInitialData(realMixPanel))
-    await capturePlaylist(MIX_URL)
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-  })
+  it.effect('does not attempt a continuation fetch for a mix (only one fetch call total)', () =>
+    Effect.gen(function* () {
+      const { layer, calls } = makeHttpLayer(htmlWithInitialData(realMixPanel))
+      yield* capturePlaylist(MIX_URL).pipe(Effect.provide(layer))
+      assert.strictEqual(calls.length, 1)
+    }),
+  )
 
-  it('includes the fetched URL in the error message when the page fetch fails', async () => {
-    mockFetchText('', false, 500)
-    await expect(capturePlaylist(MIX_URL)).rejects.toThrow(
-      /https:\/\/www\.youtube\.com\/watch\?v=9UZKYgqcY8U&list=RD9UZKYgqcY8U/,
-    )
-  })
+  it.effect('fails with HttpStatusError including the fetched URL when the page fetch fails', () =>
+    Effect.gen(function* () {
+      const { layer } = makeHttpLayer('', { fail: true })
+      const result = yield* Effect.result(capturePlaylist(MIX_URL).pipe(Effect.provide(layer)))
+      assert.isTrue(Result.isFailure(result))
+      if (Result.isFailure(result)) {
+        assert.instanceOf(result.failure, HttpStatusError)
+        assert.strictEqual(
+          result.failure.url,
+          'https://www.youtube.com/watch?v=9UZKYgqcY8U&list=RD9UZKYgqcY8U',
+        )
+      }
+    }),
+  )
 })

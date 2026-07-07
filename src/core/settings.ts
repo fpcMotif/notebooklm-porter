@@ -1,3 +1,6 @@
+import { Effect } from 'effect'
+import { Kv } from './fx/services'
+import type { StorageError } from './fx/errors'
 import type { NblmAccount } from './accounts/parse'
 
 const KEY = 'porter/settings'
@@ -18,15 +21,22 @@ export const DEFAULT_SETTINGS: PorterSettings = {
   accounts: [],
 }
 
-export async function getSettings(): Promise<PorterSettings> {
-  const got = await browser.storage.local.get(KEY)
-  const stored = got[KEY] as Partial<PorterSettings> | undefined
-  return { ...DEFAULT_SETTINGS, ...stored }
+export function getSettings(): Effect.Effect<PorterSettings, StorageError, Kv> {
+  return Effect.gen(function* () {
+    const kv = yield* Kv
+    const stored = yield* kv.get<Partial<PorterSettings>>(KEY)
+    return { ...DEFAULT_SETTINGS, ...stored }
+  })
 }
 
-export async function updateSettings(patch: Partial<PorterSettings>): Promise<PorterSettings> {
-  const current = await getSettings()
-  const next: PorterSettings = { ...current, ...patch }
-  await browser.storage.local.set({ [KEY]: next })
-  return next
+export function updateSettings(
+  patch: Partial<PorterSettings>,
+): Effect.Effect<PorterSettings, StorageError, Kv> {
+  return Effect.gen(function* () {
+    const kv = yield* Kv
+    const current = yield* getSettings()
+    const next: PorterSettings = { ...current, ...patch }
+    yield* kv.set(KEY, next)
+    return next
+  })
 }

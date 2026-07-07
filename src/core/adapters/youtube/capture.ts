@@ -1,4 +1,7 @@
-import type { Capture } from '../../model/types'
+import { Effect, Result } from 'effect'
+import type { Capture, VideoEntry } from '../../model/types'
+import { ExtractionError, type FetchError, type HttpStatusError } from '../../fx/errors'
+import { Http } from '../../fx/services'
 import {
   extractInnertube,
   extractYtInitialData,
@@ -19,55 +22,61 @@ export function isMixList(listId: string): boolean {
  * InnerTube `browse` continuations for the rest. Runs in the background
  * service worker — no content script involved.
  */
-export async function capturePlaylist(url: string): Promise<Capture> {
-  const playlistId = extractPlaylistId(url)
+export function capturePlaylist(
+  url: string,
+): Effect.Effect<Capture, FetchError | HttpStatusError | ExtractionError, Http> {
+  return Effect.gen(function* () {
+    const playlistId = yield* extractPlaylistId(url)
 
-  if (isMixList(playlistId)) {
-    return captureMixPlaylist(url, playlistId)
-  }
+    if (isMixList(playlistId)) {
+      return yield* captureMixPlaylist(url, playlistId)
+    }
 
-  const pageUrl = `https://www.youtube.com/playlist?list=${playlistId}`
-  const html = await fetchPageHtml(pageUrl)
+    const pageUrl = `https://www.youtube.com/playlist?list=${playlistId}`
+    const html = yield* fetchPageHtml(pageUrl)
 
-  const initialData = extractDataOrThrow(html, pageUrl)
-  const { playlist, continuation: firstContinuation } = parsePlaylistOrThrow(
-    initialData,
-    playlistId,
-    pageUrl,
-  )
+    const initialData = yield* extractDataOrFail(html, pageUrl)
+    const { playlist, continuation: firstContinuation } = yield* parsePlaylistOrFail(
+      initialData,
+      playlistId,
+      pageUrl,
+    )
 
-  let continuation = firstContinuation
-  let truncated = false
+    let continuation = firstContinuation
+    let truncated = false
 
-  if (continuation) {
-    const { apiKey, context } = extractInnertube(html)
-    // Sequential by necessity: each continuation token is only known after
-    // the previous page's response, so this can't be parallelized.
-    while (continuation && playlist.videos.length < MAX_VIDEOS) {
-      let next: {
-        videos: Awaited<ReturnType<typeof parseContinuation>>['videos']
-        continuation?: string
+    if (continuation) {
+      const { apiKey, context } = yield* extractInnertubeOrFail(html, pageUrl)
+      // Sequential by necessity: each continuation token is only known after
+      // the previous page's response, so this can't be parallelized.
+      while (continuation && playlist.videos.length < MAX_VIDEOS) {
+        const next: { videos: VideoEntry[]; continuation?: string } | undefined = yield* Effect.gen(
+          function* () {
+            const result = yield* Effect.result(
+              fetchContinuation(apiKey, context, continuation as string),
+            )
+            return Result.isSuccess(result) ? result.success : undefined
+          },
+        )
+        if (next === undefined) {
+          truncated = true
+          break
+        }
+        playlist.videos.push(...next.videos)
+        continuation = next.continuation
       }
-      try {
-        next = await fetchContinuation(apiKey, context, continuation)
-      } catch {
+      if (continuation && playlist.videos.length >= MAX_VIDEOS) {
         truncated = true
-        break
       }
-      playlist.videos.push(...next.videos)
-      continuation = next.continuation
     }
-    if (continuation && playlist.videos.length >= MAX_VIDEOS) {
-      truncated = true
+
+    playlist.videoCount = Math.max(playlist.videoCount, playlist.videos.length)
+    if (truncated) {
+      playlist.truncated = true
     }
-  }
 
-  playlist.videoCount = Math.max(playlist.videoCount, playlist.videos.length)
-  if (truncated) {
-    playlist.truncated = true
-  }
-
-  return { kind: 'playlist', playlist }
+    return { kind: 'playlist', playlist }
+  })
 }
 
 /**
@@ -75,82 +84,96 @@ export async function capturePlaylist(url: string): Promise<Capture> {
  * page and are session-generated + endless, so there's no continuation to
  * walk — just parse the watch page's embedded panel and mark it truncated.
  */
-async function captureMixPlaylist(url: string, playlistId: string): Promise<Capture> {
-  const pageUrl = cleanWatchUrl(url, playlistId)
-  const html = await fetchPageHtml(pageUrl)
+function captureMixPlaylist(
+  url: string,
+  playlistId: string,
+): Effect.Effect<Capture, FetchError | HttpStatusError | ExtractionError, Http> {
+  return Effect.gen(function* () {
+    const pageUrl = yield* cleanWatchUrl(url, playlistId)
+    const html = yield* fetchPageHtml(pageUrl)
 
-  const initialData = extractDataOrThrow(html, pageUrl)
-  const { playlist } = parsePlaylistOrThrow(initialData, playlistId, pageUrl)
+    const initialData = yield* extractDataOrFail(html, pageUrl)
+    const { playlist } = yield* parsePlaylistOrFail(initialData, playlistId, pageUrl)
 
-  playlist.url = pageUrl
-  playlist.videoCount = Math.max(playlist.videoCount, playlist.videos.length)
-  playlist.truncated = true
+    playlist.url = pageUrl
+    playlist.videoCount = Math.max(playlist.videoCount, playlist.videos.length)
+    playlist.truncated = true
 
-  return { kind: 'playlist', playlist }
+    return { kind: 'playlist', playlist }
+  })
 }
 
 /** Strips `t=`/other player params from a watch URL, keeping only `v=` and `list=`. */
-function cleanWatchUrl(url: string, playlistId: string): string {
+function cleanWatchUrl(url: string, playlistId: string): Effect.Effect<string, ExtractionError> {
   const u = new URL(url)
   const videoId = u.searchParams.get('v')
   if (!videoId) {
-    throw new Error(`capturePlaylist: no video id ("v=") found in mix URL ${url}`)
+    return Effect.fail(new ExtractionError({ url, reason: `no video id ("v=") found in mix URL` }))
   }
-  return `https://www.youtube.com/watch?v=${videoId}&list=${playlistId}`
+  return Effect.succeed(`https://www.youtube.com/watch?v=${videoId}&list=${playlistId}`)
 }
 
-async function fetchPageHtml(pageUrl: string): Promise<string> {
-  let pageRes: Response
-  try {
-    pageRes = await fetch(pageUrl, { headers: { 'Accept-Language': 'en' } })
-  } catch (err) {
-    throw new Error(`capturePlaylist: fetch ${pageUrl} failed`, { cause: err })
-  }
-  if (!pageRes.ok) {
-    throw new Error(`capturePlaylist: fetch ${pageUrl} failed with ${pageRes.status}`)
-  }
-  return pageRes.text()
+function fetchPageHtml(pageUrl: string): Effect.Effect<string, FetchError | HttpStatusError, Http> {
+  return Effect.gen(function* () {
+    const http = yield* Http
+    return yield* http.text(pageUrl, { headers: { 'Accept-Language': 'en' } })
+  })
 }
 
-function extractDataOrThrow(html: string, pageUrl: string): unknown {
-  try {
-    return extractYtInitialData(html)
-  } catch (err) {
-    throw new Error(`capturePlaylist: failed to parse page ${pageUrl}`, { cause: err })
-  }
+function extractDataOrFail(html: string, pageUrl: string): Effect.Effect<unknown, ExtractionError> {
+  return Effect.try({
+    try: () => extractYtInitialData(html),
+    catch: (cause) => new ExtractionError({ url: pageUrl, reason: String(cause) }),
+  })
 }
 
-function parsePlaylistOrThrow(
+function extractInnertubeOrFail(
+  html: string,
+  pageUrl: string,
+): Effect.Effect<{ apiKey: string; context: unknown }, ExtractionError> {
+  return Effect.try({
+    try: () => extractInnertube(html),
+    catch: (cause) => new ExtractionError({ url: pageUrl, reason: String(cause) }),
+  })
+}
+
+function parsePlaylistOrFail(
   data: unknown,
   playlistId: string,
   pageUrl: string,
-): ReturnType<typeof parsePlaylistPage> {
-  try {
-    return parsePlaylistPage(data, playlistId)
-  } catch (err) {
-    throw new Error(`capturePlaylist: failed to parse page ${pageUrl}`, { cause: err })
-  }
+): Effect.Effect<ReturnType<typeof parsePlaylistPage>, ExtractionError> {
+  return Effect.try({
+    try: () => parsePlaylistPage(data, playlistId),
+    catch: (cause) => new ExtractionError({ url: pageUrl, reason: String(cause) }),
+  })
 }
 
 /** Derives the `list=` playlist id from either a `/playlist` or `/watch` URL. */
-function extractPlaylistId(url: string): string {
+function extractPlaylistId(url: string): Effect.Effect<string, ExtractionError> {
   const u = new URL(url)
   const listId = u.searchParams.get('list')
   if (!listId) {
-    throw new Error(`capturePlaylist: no playlist id ("list=") found in ${url}`)
+    return Effect.fail(new ExtractionError({ url, reason: `no playlist id ("list=") found` }))
   }
-  return listId
+  return Effect.succeed(listId)
 }
 
-async function fetchContinuation(apiKey: string, context: unknown, continuation: string) {
-  const res = await fetch(`https://www.youtube.com/youtubei/v1/browse?key=${apiKey}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Accept-Language': 'en' },
-    body: JSON.stringify({ context, continuation }),
+function fetchContinuation(
+  apiKey: string,
+  context: unknown,
+  continuation: string,
+): Effect.Effect<
+  { videos: VideoEntry[]; continuation?: string },
+  FetchError | HttpStatusError,
+  Http
+> {
+  return Effect.gen(function* () {
+    const http = yield* Http
+    const json = yield* http.json(`https://www.youtube.com/youtubei/v1/browse?key=${apiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept-Language': 'en' },
+      body: JSON.stringify({ context, continuation }),
+    })
+    return parseContinuation(json)
   })
-  if (!res.ok) {
-    throw new Error(`capturePlaylist: continuation fetch failed with ${res.status}`)
-  }
-  const json = await res.json()
-  return parseContinuation(json)
 }

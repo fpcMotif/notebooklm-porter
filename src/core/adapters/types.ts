@@ -1,3 +1,6 @@
+import type { Effect } from 'effect'
+import type { PorterError } from '../fx/errors'
+import type { DebugLog, Http } from '../fx/services'
 import type { Capture, SiteId } from '../model/types'
 
 /**
@@ -31,7 +34,7 @@ export interface SourceAdapter {
   /** What this URL offers, or null when the page has nothing capturable. */
   detect(url: string): Capturable | null
   /** Background-side capture from the URL alone. Mutually exclusive with `contentScript`. */
-  captureFromUrl?(url: string): Promise<Capture>
+  captureFromUrl?(url: string): Effect.Effect<Capture, PorterError, Http | DebugLog>
   /** True when a content script owns extraction for this site. */
   contentScript?: boolean
 }

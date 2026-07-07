@@ -1,9 +1,10 @@
 /**
  * Drive backup — thin service-worker wrapper around the pure request
  * builders in `drive.ts`. Owns everything `drive.ts` deliberately doesn't:
- * OAuth (`browser.identity`), fetch, and the find-or-create/update flow
+ * OAuth (`Identity`), fetch (`Http`), and the find-or-create/update flow
  * against the "NotebookLM Porter" Drive folder.
  */
+import { Effect, Result } from 'effect'
 import {
   buildAuthUrl,
   buildCreateFileRequest,
@@ -15,7 +16,8 @@ import {
   parseAuthRedirect,
   type DriveRequest,
 } from './drive'
-import { dbg } from '../debug'
+import { DriveAuthError, DriveApiError, HttpStatusError, type StorageError } from '../fx/errors'
+import { DebugLog, Http, Identity, Kv } from '../fx/services'
 import { getSettings } from '../settings'
 import { listDocs } from '../store'
 
@@ -32,110 +34,152 @@ interface DriveFile {
   name: string
 }
 
-async function driveFetch(req: DriveRequest): Promise<unknown> {
-  const res = await fetch(req.url, {
-    method: req.method,
-    headers: req.headers,
-    ...(req.body !== undefined ? { body: req.body } : {}),
+function driveFetch(step: string, req: DriveRequest): Effect.Effect<unknown, DriveApiError, Http> {
+  return Effect.gen(function* () {
+    const http = yield* Http
+    const result = yield* Effect.result(
+      http.text(req.url, {
+        method: req.method,
+        headers: req.headers,
+        ...(req.body !== undefined ? { body: req.body } : {}),
+      }),
+    )
+    if (Result.isFailure(result)) {
+      const status = result.failure instanceof HttpStatusError ? result.failure.status : 0
+      return yield* Effect.fail(new DriveApiError({ step, status }))
+    }
+    const text = result.success
+    return text.length > 0 ? JSON.parse(text) : {}
   })
-  if (!res.ok) {
-    throw new Error(`Drive request failed: ${res.status} ${res.statusText}`)
-  }
-  const text = await res.text()
-  return text.length > 0 ? JSON.parse(text) : {}
 }
 
-async function listFiles(req: DriveRequest): Promise<DriveFile[]> {
-  const parsed = (await driveFetch(req)) as { files?: DriveFile[] }
-  return parsed.files ?? []
+function listFiles(
+  step: string,
+  req: DriveRequest,
+): Effect.Effect<DriveFile[], DriveApiError, Http> {
+  return Effect.gen(function* () {
+    const parsed = (yield* driveFetch(step, req)) as { files?: DriveFile[] }
+    return parsed.files ?? []
+  })
 }
 
-async function authenticate(clientId: string): Promise<string> {
-  const redirectUri = browser.identity.getRedirectURL()
-  const authUrl = buildAuthUrl({ clientId, redirectUri })
-  const redirectUrl = await browser.identity.launchWebAuthFlow({ url: authUrl, interactive: true })
-  if (redirectUrl === undefined) {
-    throw new Error('Google sign-in was cancelled')
-  }
+function authenticate(clientId: string): Effect.Effect<string, DriveAuthError, Identity> {
+  return Effect.gen(function* () {
+    const identity = yield* Identity
+    const redirectUri = identity.redirectUrl()
+    const authUrl = buildAuthUrl({ clientId, redirectUri })
+    const redirectUrl = yield* identity.launchAuthFlow(authUrl)
 
-  const result = parseAuthRedirect(redirectUrl)
-  if ('error' in result) {
-    throw new Error(`Google sign-in failed: ${result.error}`)
-  }
-  return result.accessToken
+    const result = parseAuthRedirect(redirectUrl)
+    if ('error' in result) {
+      return yield* Effect.fail(new DriveAuthError({ reason: result.error }))
+    }
+    return result.accessToken
+  })
 }
 
-async function findOrCreateFolder(token: string): Promise<string> {
-  const existing = await listFiles(buildFindFolderRequest(token, BACKUP_FOLDER_NAME))
-  const found = existing[0]
-  if (found !== undefined) {
-    dbg('drive', 'folder', { outcome: 'found', id: found.id })
-    return found.id
-  }
+function findOrCreateFolder(token: string): Effect.Effect<string, DriveApiError, Http | DebugLog> {
+  return Effect.gen(function* () {
+    const debugLog = yield* DebugLog
+    const existing = yield* listFiles(
+      'find-folder',
+      buildFindFolderRequest(token, BACKUP_FOLDER_NAME),
+    )
+    const found = existing[0]
+    if (found !== undefined) {
+      yield* debugLog.log('drive', 'folder', { outcome: 'found', id: found.id })
+      return found.id
+    }
 
-  const created = (await driveFetch(buildCreateFolderRequest(token, BACKUP_FOLDER_NAME))) as {
-    id: string
-  }
-  dbg('drive', 'folder', { outcome: 'created', id: created.id })
-  return created.id
+    const created = (yield* driveFetch(
+      'create-folder',
+      buildCreateFolderRequest(token, BACKUP_FOLDER_NAME),
+    )) as { id: string }
+    yield* debugLog.log('drive', 'folder', { outcome: 'created', id: created.id })
+    return created.id
+  })
 }
 
 /**
  * Backs up the given docs to the user's Drive, one file per doc inside a
- * single "NotebookLM Porter" folder. Per-doc try/catch so one failing
- * upload never aborts the rest of the batch.
+ * single "NotebookLM Porter" folder. Per-doc isolation via `Effect.result`
+ * so one failing upload never aborts the rest of the batch.
  */
-export async function backupDocsToDrive(docIds: string[]): Promise<BackupOutcome[]> {
-  const settings = await getSettings()
-  const clientId = settings.driveClientId
-  if (clientId === undefined || clientId.length === 0) {
-    throw new Error('Set your Google OAuth Client ID in Settings first')
-  }
-
-  const token = await authenticate(clientId)
-  const folderId = await findOrCreateFolder(token)
-
-  const docs = await listDocs()
-  const byId = new Map(docs.map((doc) => [doc.id, doc]))
-
-  const outcomes: BackupOutcome[] = []
-  for (const docId of docIds) {
-    const doc = byId.get(docId)
-    if (doc === undefined) {
-      outcomes.push({ docId, ok: false, error: 'Doc not found' })
-      continue
+export function backupDocsToDrive(
+  docIds: string[],
+): Effect.Effect<BackupOutcome[], DriveAuthError | StorageError, Http | Identity | Kv | DebugLog> {
+  return Effect.gen(function* () {
+    const settings = yield* getSettings()
+    const clientId = settings.driveClientId
+    if (clientId === undefined || clientId.length === 0) {
+      return yield* Effect.fail(new DriveAuthError({ reason: 'missing-client-id' }))
     }
 
-    // eslint-disable-next-line no-await-in-loop
-    outcomes.push(await backupOne(token, folderId, docId, doc.title, doc.markdown))
-  }
-  return outcomes
+    const token = yield* authenticate(clientId)
+    const folderResult = yield* Effect.result(findOrCreateFolder(token))
+    if (Result.isFailure(folderResult)) {
+      return yield* Effect.fail(
+        new DriveAuthError({ reason: `folder setup failed: ${folderResult.failure.step}` }),
+      )
+    }
+    const folderId = folderResult.success
+
+    const docs = yield* listDocs()
+    const byId = new Map(docs.map((doc) => [doc.id, doc]))
+
+    const outcomes: BackupOutcome[] = []
+    for (const docId of docIds) {
+      const doc = byId.get(docId)
+      if (doc === undefined) {
+        outcomes.push({ docId, ok: false, error: 'Doc not found' })
+        continue
+      }
+
+      // Sequential + isolated by design: one doc's failure must not abort the
+      // rest of the batch, and Drive quota is per-request anyway.
+      outcomes.push(yield* backupOne(token, folderId, docId, doc.title, doc.markdown))
+    }
+    return outcomes
+  })
 }
 
-async function backupOne(
+function backupOne(
   token: string,
   folderId: string,
   docId: string,
   title: string,
   content: string,
-): Promise<BackupOutcome> {
-  try {
-    const name = docFileName(title)
-    const existing = await listFiles(buildFindFileRequest(token, name, folderId))
-    const found = existing[0]
-    if (found !== undefined) {
-      await driveFetch(buildUpdateFileRequest(token, found.id, content))
-      dbg('drive', 'upload', { docId, outcome: 'updated', id: found.id })
-    } else {
-      await driveFetch(
-        buildCreateFileRequest(token, { name, folderId, content, boundary: crypto.randomUUID() }),
-      )
-      dbg('drive', 'upload', { docId, outcome: 'created' })
+): Effect.Effect<BackupOutcome, never, Http | DebugLog> {
+  return Effect.gen(function* () {
+    const debugLog = yield* DebugLog
+    const result = yield* Effect.result(
+      Effect.gen(function* () {
+        const name = docFileName(title)
+        const existing = yield* listFiles('find-file', buildFindFileRequest(token, name, folderId))
+        const found = existing[0]
+        if (found !== undefined) {
+          yield* driveFetch('update-file', buildUpdateFileRequest(token, found.id, content))
+          yield* debugLog.log('drive', 'upload', { docId, outcome: 'updated', id: found.id })
+        } else {
+          yield* driveFetch(
+            'create-file',
+            buildCreateFileRequest(token, {
+              name,
+              folderId,
+              content,
+              boundary: crypto.randomUUID(),
+            }),
+          )
+          yield* debugLog.log('drive', 'upload', { docId, outcome: 'created' })
+        }
+      }),
+    )
+
+    if (Result.isFailure(result)) {
+      const message = `${result.failure.step}: ${result.failure.status}`
+      yield* debugLog.log('drive', 'upload', { docId, outcome: 'failed', error: message })
+      return { docId, ok: false, error: message }
     }
     return { docId, ok: true }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    dbg('drive', 'upload', { docId, outcome: 'failed', error: message })
-    return { docId, ok: false, error: message }
-  }
+  })
 }

@@ -1,5 +1,5 @@
-import type { Capture } from '../../model/types'
 import type { Capturable, SourceAdapter } from '../types'
+import { captureRedditThread } from './capture'
 
 export const redditAdapter: SourceAdapter = {
   id: 'reddit',
@@ -17,10 +17,7 @@ export const redditAdapter: SourceAdapter = {
     }
     return null
   },
-  async captureFromUrl(url: string): Promise<Capture> {
-    const { captureRedditThread } = await import('./capture')
-    return captureRedditThread(url)
-  },
+  captureFromUrl: captureRedditThread,
 }
 
 function safeUrl(url: string): URL | null {

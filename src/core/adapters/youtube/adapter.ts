@@ -1,6 +1,5 @@
-import type { Capture } from '../../model/types'
 import type { Capturable, SourceAdapter } from '../types'
-import { isMixList } from './capture'
+import { capturePlaylist, isMixList } from './capture'
 
 export const youtubeAdapter: SourceAdapter = {
   id: 'youtube',
@@ -20,11 +19,7 @@ export const youtubeAdapter: SourceAdapter = {
     }
     return null
   },
-  async captureFromUrl(url: string): Promise<Capture> {
-    // Implemented in ./capture.ts (playlist page fetch + InnerTube continuations).
-    const { capturePlaylist } = await import('./capture')
-    return capturePlaylist(url)
-  },
+  captureFromUrl: capturePlaylist,
 }
 
 function safeUrl(url: string): URL | null {
