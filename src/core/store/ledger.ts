@@ -8,6 +8,9 @@
  * Reducers below are pure — no storage access — so the classification and
  * update logic is fully unit-testable without mocking `browser.storage`.
  */
+import { Effect } from 'effect'
+import { Kv } from '../fx/services'
+import type { StorageError } from '../fx/errors'
 
 export interface LedgerEntry {
   contentHash: string
@@ -99,12 +102,17 @@ export function contentHash(markdown: string): string {
 
 const STORAGE_KEY = 'porter/ledger'
 
-/** Thin storage.local wrapper — logic lives in the pure reducers above. */
-export async function loadLedger(): Promise<Ledger> {
-  const got = await browser.storage.local.get(STORAGE_KEY)
-  return (got[STORAGE_KEY] ?? {}) as Ledger
+/** Thin `Kv` wrapper — logic lives in the pure reducers above. */
+export function loadLedger(): Effect.Effect<Ledger, StorageError, Kv> {
+  return Effect.gen(function* () {
+    const kv = yield* Kv
+    return (yield* kv.get<Ledger>(STORAGE_KEY)) ?? {}
+  })
 }
 
-export async function saveLedger(ledger: Ledger): Promise<void> {
-  await browser.storage.local.set({ [STORAGE_KEY]: ledger })
+export function saveLedger(ledger: Ledger): Effect.Effect<void, StorageError, Kv> {
+  return Effect.gen(function* () {
+    const kv = yield* Kv
+    yield* kv.set(STORAGE_KEY, ledger)
+  })
 }

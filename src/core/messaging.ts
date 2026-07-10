@@ -1,7 +1,9 @@
+import { Context, Effect } from 'effect'
 import type { NblmAccount } from './accounts/parse'
 import type { BackupOutcome } from './backup/client'
 import type { DebugEntry } from './debug'
-import type { IngestOutcome } from './ingest/notebooklm'
+import { IpcError } from './fx/errors'
+import type { IngestableDoc, IngestOutcome } from './ingest/notebooklm'
 import type { Capture, SourceDoc } from './model/types'
 import type { PorterSettings } from './settings'
 
@@ -29,6 +31,8 @@ export type PorterMessage =
   | { type: 'porter/ingest'; docIds: string[]; notebookId: string }
   /** Popup asks the background to list notebooks in the active NBLM account. */
   | { type: 'porter/list-notebooks' }
+  /** Popup asks the background to create a notebook, then re-list. */
+  | { type: 'porter/create-notebook'; title: string }
   /** Popup asks the background to re-scan signed-in NotebookLM accounts. */
   | { type: 'porter/accounts-refresh' }
   /** Popup reads persisted settings. */
@@ -42,23 +46,60 @@ export type PorterMessage =
   /** Popup clears the persisted SW debug ring. */
   | { type: 'porter/debug-clear' }
 
-export type PorterResponse =
-  | {
-      ok: true
-      docs?: SourceDoc[]
-      capturable?: string
-      settings?: PorterSettings
-      accounts?: NblmAccount[]
-      backup?: BackupOutcome[]
-      notebooks?: { id: string; title: string }[]
-      ingest?: IngestOutcome[]
-      debugLog?: DebugEntry[]
-    }
-  | { ok: false; error: string }
+/** One row of the notebook picker — a NotebookLM notebook's id + title. */
+export type NotebookMeta = { id: string; title: string }
 
-/** Typed wrapper over runtime.sendMessage. */
-export function sendMessage(msg: PorterMessage): Promise<PorterResponse> {
-  return browser.runtime.sendMessage(msg) as Promise<PorterResponse>
+/** Per-message success payloads — the single source of truth for both sides of the wire. */
+export interface PorterResponseMap {
+  'porter/detect': { capturable?: string }
+  'porter/capture-url': { docs: SourceDoc[] }
+  'porter/capture-page': { docs: SourceDoc[] }
+  'porter/capture-result': { docs: SourceDoc[] }
+  'porter/list-docs': { docs: SourceDoc[] }
+  'porter/delete-doc': {}
+  'porter/export': {}
+  'porter/ingest': { ingest: IngestOutcome[] }
+  'porter/list-notebooks': { notebooks: NotebookMeta[] }
+  'porter/create-notebook': { notebooks: NotebookMeta[]; created: NotebookMeta }
+  'porter/accounts-refresh': { accounts: NblmAccount[] }
+  'porter/get-settings': { settings: PorterSettings }
+  'porter/update-settings': { settings: PorterSettings }
+  'porter/backup-drive': { backup: BackupOutcome[] }
+  'porter/debug-log': { debugLog: DebugEntry[] }
+  'porter/debug-clear': {}
+}
+
+export type PorterFail = { ok: false; error: string }
+export type PorterReply<K extends PorterMessage['type']> =
+  | ({ ok: true } & PorterResponseMap[K])
+  | PorterFail
+
+/** Background → content-script requests. */
+export type ContentRequest =
+  | { type: 'porter/extract-thread' }
+  | { type: 'porter/ingest-doc'; doc: IngestableDoc }
+
+export type ExtractResponse = { ok: true; capture: Capture } | { ok: false; error: string }
+
+export function hasMessageType<T extends string>(value: unknown, type: T): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'type' in value &&
+    (value as { type: unknown }).type === type
+  )
+}
+
+export function isExtractResponse(value: unknown): value is ExtractResponse {
+  if (typeof value !== 'object' || value === null || !('ok' in value)) return false
+  const ok = (value as { ok: unknown }).ok
+  if (typeof ok !== 'boolean') return false
+  if (ok) {
+    const capture = (value as { capture?: unknown }).capture
+    return typeof capture === 'object' && capture !== null
+  }
+  const error = (value as { error?: unknown }).error
+  return typeof error === 'string'
 }
 
 export function isPorterMessage(value: unknown): value is PorterMessage {
@@ -70,3 +111,13 @@ export function isPorterMessage(value: unknown): value is PorterMessage {
     (value as { type: string }).type.startsWith('porter/')
   )
 }
+
+export interface PorterClientShape {
+  readonly request: <K extends PorterMessage['type']>(
+    msg: Extract<PorterMessage, { type: K }>,
+  ) => Effect.Effect<PorterResponseMap[K], IpcError>
+}
+
+export class PorterClient extends Context.Service<PorterClient, PorterClientShape>()(
+  'porter/PorterClient',
+) {}

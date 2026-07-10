@@ -5,11 +5,13 @@
  *
  * TODO(codegen): implement per docs/superpowers/specs design §Ingest.
  */
+import { hasMessageType } from '../core/messaging'
+
 export default defineContentScript({
   matches: ['https://notebooklm.google.com/*'],
   main() {
     browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-      if ((message as { type?: string }).type !== 'porter/ingest-doc') return
+      if (!hasMessageType(message, 'porter/ingest-doc')) return
       sendResponse({ ok: false, error: 'NotebookLM ingest assist not implemented yet' })
     })
   },

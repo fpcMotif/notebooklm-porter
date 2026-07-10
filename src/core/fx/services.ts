@@ -5,7 +5,8 @@
  * testable without patching globals.
  */
 import { Context, Effect } from 'effect'
-import { DriveAuthError, FetchError, HttpStatusError, StorageError } from './errors'
+import type { DebugEntry } from '../debug'
+import { DriveAuthError, FetchError, HttpStatusError, IpcError, StorageError } from './errors'
 
 export interface HttpInit {
   method?: string
@@ -43,9 +44,19 @@ export class Identity extends Context.Service<Identity, IdentityShape>()('porter
 
 export interface DebugLogShape {
   readonly log: (scope: string, msg: string, data?: unknown) => Effect.Effect<void>
+  readonly entries: () => Effect.Effect<DebugEntry[], StorageError>
+  readonly clear: () => Effect.Effect<void, StorageError>
 }
 
 export class DebugLog extends Context.Service<DebugLog, DebugLogShape>()('porter/DebugLog') {}
+
+export interface TabsShape {
+  /** Active tab in the current window; fields omitted when Chrome doesn't report them. */
+  readonly activeTab: () => Effect.Effect<{ id?: number; url?: string }, IpcError>
+  readonly sendMessage: (tabId: number, msg: unknown) => Effect.Effect<unknown, IpcError>
+}
+
+export class Tabs extends Context.Service<Tabs, TabsShape>()('porter/Tabs') {}
 
 /**
  * Builds an `HttpShape` around an injected `fetch`-compatible function — the

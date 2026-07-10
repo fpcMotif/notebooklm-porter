@@ -11,7 +11,14 @@ import { DebugLog, Http, type HttpInit } from '../../fx/services'
 import { fetchSession, rpcCall } from './client'
 import { RPC_IDS } from './protocol'
 
-const NoopDebugLive = Layer.succeed(DebugLog, DebugLog.of({ log: () => Effect.void }))
+const NoopDebugLive = Layer.succeed(
+  DebugLog,
+  DebugLog.of({
+    log: () => Effect.void,
+    entries: () => Effect.succeed([]),
+    clear: () => Effect.void,
+  }),
+)
 
 function httpLayer(
   handler: (url: string, init?: HttpInit) => Effect.Effect<string, FetchError | HttpStatusError>,

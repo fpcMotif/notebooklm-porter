@@ -1,7 +1,11 @@
+import { Effect, Result } from 'effect'
 import { useEffect, useState } from 'preact/hooks'
+import { Tabs } from '../../core/fx/services'
+import { popupRuntime } from '../../core/fx/runtime-popup'
 import type { SourceDoc } from '../../core/model/types'
-import { sendMessage } from '../../core/messaging'
+import { PorterClient, type NotebookMeta } from '../../core/messaging'
 import { DEFAULT_SETTINGS, type PorterSettings } from '../../core/settings'
+import { useAction } from './useAction'
 
 /**
  * Popup: detect what the active tab offers, one-click capture, then a
@@ -11,25 +15,87 @@ import { DEFAULT_SETTINGS, type PorterSettings } from '../../core/settings'
  */
 
 async function clearDebugLog() {
-  await sendMessage({ type: 'porter/debug-clear' })
+  await popupRuntime.runPromise(
+    Effect.catchTag(
+      Effect.gen(function* () {
+        const client = yield* PorterClient
+        yield* client.request({ type: 'porter/debug-clear' })
+      }),
+      'IpcError',
+      () => Effect.succeed(undefined),
+    ),
+  )
 }
 
 export function App() {
   const [docs, setDocs] = useState<SourceDoc[]>([])
   const [capturable, setCapturable] = useState<string | undefined>()
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | undefined>()
   const [settings, setSettings] = useState<PorterSettings>(DEFAULT_SETTINGS)
-  const [accountsBusy, setAccountsBusy] = useState(false)
-  const [backupBusy, setBackupBusy] = useState(false)
   const [backupResult, setBackupResult] = useState<{ text: string; isError: boolean } | undefined>()
-  const [notebooks, setNotebooks] = useState<{ id: string; title: string }[]>([])
-  const [notebooksBusy, setNotebooksBusy] = useState(false)
+  const [notebooks, setNotebooks] = useState<NotebookMeta[]>([])
   const [notebooksError, setNotebooksError] = useState<string | undefined>()
   const [selectedNotebookId, setSelectedNotebookId] = useState('')
-  const [ingestBusy, setIngestBusy] = useState(false)
+  const [newNotebookTitle, setNewNotebookTitle] = useState('')
   const [ingestResult, setIngestResult] = useState<{ text: string; isError: boolean } | undefined>()
   const [debugCopyStatus, setDebugCopyStatus] = useState<string | undefined>()
+
+  // Shared with accountsAction (FIX 3) so discovering accounts for the first
+  // time also populates the notebook list, instead of composing via a faked
+  // click on loadNotebooksAction.
+  const loadNotebooksEffect = Effect.gen(function* () {
+    setNotebooksError(undefined)
+    const client = yield* PorterClient
+    const result = yield* Effect.result(client.request({ type: 'porter/list-notebooks' }))
+    if (Result.isFailure(result)) {
+      setNotebooksError(result.failure.reason)
+      return
+    }
+    const list = result.success.notebooks
+    setNotebooks(list)
+    if (selectedNotebookId === '' && list.length > 0 && list[0]) {
+      setSelectedNotebookId(list[0].id)
+    }
+  })
+
+  const loadNotebooksAction = useAction<[]>(() => loadNotebooksEffect)
+
+  const createNotebookAction = useAction<[]>(() =>
+    Effect.gen(function* () {
+      const title = newNotebookTitle.trim()
+      if (title === '') return
+      setNotebooksError(undefined)
+      const client = yield* PorterClient
+      const result = yield* Effect.result(client.request({ type: 'porter/create-notebook', title }))
+      if (Result.isFailure(result)) {
+        setNotebooksError(result.failure.reason)
+        return
+      }
+      setNotebooks(result.success.notebooks)
+      setSelectedNotebookId(result.success.created.id)
+      setNewNotebookTitle('')
+    }),
+  )
+
+  const refreshEffect = Effect.gen(function* () {
+    const client = yield* PorterClient
+    const tabs = yield* Tabs
+    const tab = yield* tabs.activeTab()
+    if (tab.url) {
+      const detected = yield* Effect.result(client.request({ type: 'porter/detect', url: tab.url }))
+      if (Result.isSuccess(detected)) setCapturable(detected.success.capturable)
+    }
+    const listed = yield* Effect.result(client.request({ type: 'porter/list-docs' }))
+    if (Result.isSuccess(listed)) setDocs(listed.success.docs)
+    const settingsResult = yield* Effect.result(client.request({ type: 'porter/get-settings' }))
+    if (Result.isSuccess(settingsResult)) {
+      setSettings(settingsResult.success.settings)
+      if (settingsResult.success.settings.accounts.length > 0) loadNotebooksAction.run()
+    }
+  })
+
+  function refresh() {
+    return popupRuntime.runPromise(refreshEffect)
+  }
 
   useEffect(() => {
     void refresh()
@@ -38,55 +104,37 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  async function refresh() {
-    const [tab] = await browser.tabs.query({ active: true, currentWindow: true })
-    if (tab?.url) {
-      const res = await sendMessage({ type: 'porter/detect', url: tab.url })
-      if (res.ok) setCapturable(res.capturable)
-    }
-    const listed = await sendMessage({ type: 'porter/list-docs' })
-    if (listed.ok && listed.docs) setDocs(listed.docs)
-    const settingsRes = await sendMessage({ type: 'porter/get-settings' })
-    if (settingsRes.ok && settingsRes.settings) {
-      setSettings(settingsRes.settings)
-      if (settingsRes.settings.accounts.length > 0) void loadNotebooks()
-    }
-  }
+  const captureAction = useAction<[]>(() =>
+    Effect.gen(function* () {
+      const client = yield* PorterClient
+      const tabs = yield* Tabs
+      const tab = yield* tabs.activeTab()
+      if (!tab.id || !tab.url) return
+      const result = yield* Effect.result(
+        client.request({ type: 'porter/capture-url', url: tab.url, tabId: tab.id }),
+      )
+      yield* refreshEffect
+      if (Result.isFailure(result)) return yield* Effect.fail(result.failure)
+    }),
+  )
 
-  async function loadNotebooks() {
-    setNotebooksBusy(true)
-    setNotebooksError(undefined)
-    try {
-      const res = await sendMessage({ type: 'porter/list-notebooks' })
-      if (!res.ok) {
-        setNotebooksError(res.error)
+  const ingestAction = useAction<[]>(() =>
+    Effect.gen(function* () {
+      if (selectedNotebookId === '') return
+      setIngestResult(undefined)
+      const client = yield* PorterClient
+      const result = yield* Effect.result(
+        client.request({
+          type: 'porter/ingest',
+          docIds: docs.map((doc) => doc.id),
+          notebookId: selectedNotebookId,
+        }),
+      )
+      if (Result.isFailure(result)) {
+        setIngestResult({ text: result.failure.reason, isError: true })
         return
       }
-      const list = res.notebooks ?? []
-      setNotebooks(list)
-      if (selectedNotebookId === '' && list.length > 0 && list[0]) {
-        setSelectedNotebookId(list[0].id)
-      }
-    } finally {
-      setNotebooksBusy(false)
-    }
-  }
-
-  async function ingest() {
-    if (selectedNotebookId === '') return
-    setIngestBusy(true)
-    setIngestResult(undefined)
-    try {
-      const res = await sendMessage({
-        type: 'porter/ingest',
-        docIds: docs.map((doc) => doc.id),
-        notebookId: selectedNotebookId,
-      })
-      if (!res.ok) {
-        setIngestResult({ text: res.error, isError: true })
-        return
-      }
-      const outcomes = res.ingest ?? []
+      const outcomes = result.success.ingest
       const failed = outcomes.find((o) => !o.ok)
       const okCount = outcomes.filter((o) => o.ok).length
       setIngestResult(
@@ -94,64 +142,33 @@ export function App() {
           ? { text: failed.error ?? 'Send to NotebookLM failed', isError: true }
           : { text: `${okCount} of ${outcomes.length} docs sent`, isError: false },
       )
-    } finally {
-      setIngestBusy(false)
-    }
-  }
+    }),
+  )
 
-  async function capture() {
-    setBusy(true)
-    setError(undefined)
-    try {
-      const [tab] = await browser.tabs.query({ active: true, currentWindow: true })
-      if (!tab?.id || !tab.url) return
-      const res = await sendMessage({ type: 'porter/capture-url', url: tab.url, tabId: tab.id })
-      if (!res.ok) setError(res.error)
-      await refresh()
-    } finally {
-      setBusy(false)
-    }
-  }
+  const accountsAction = useAction<[]>(() =>
+    Effect.gen(function* () {
+      const client = yield* PorterClient
+      const result = yield* Effect.result(client.request({ type: 'porter/accounts-refresh' }))
+      if (Result.isFailure(result)) return
+      const settingsResult = yield* Effect.result(client.request({ type: 'porter/get-settings' }))
+      if (Result.isFailure(settingsResult)) return
+      setSettings(settingsResult.success.settings)
+      if (settingsResult.success.settings.accounts.length > 0) yield* loadNotebooksEffect
+    }),
+  )
 
-  async function refreshAccounts() {
-    setAccountsBusy(true)
-    try {
-      const res = await sendMessage({ type: 'porter/accounts-refresh' })
-      if (res.ok) {
-        const settingsRes = await sendMessage({ type: 'porter/get-settings' })
-        if (settingsRes.ok && settingsRes.settings) setSettings(settingsRes.settings)
-      }
-    } finally {
-      setAccountsBusy(false)
-    }
-  }
-
-  async function selectAccount(authuser: number) {
-    const res = await sendMessage({
-      type: 'porter/update-settings',
-      patch: { nblmAuthuser: authuser },
-    })
-    if (res.ok && res.settings) setSettings(res.settings)
-  }
-
-  async function updateDriveClientId(driveClientId: string) {
-    const res = await sendMessage({ type: 'porter/update-settings', patch: { driveClientId } })
-    if (res.ok && res.settings) setSettings(res.settings)
-  }
-
-  async function backupToDrive() {
-    setBackupBusy(true)
-    setBackupResult(undefined)
-    try {
-      const res = await sendMessage({
-        type: 'porter/backup-drive',
-        docIds: docs.map((doc) => doc.id),
-      })
-      if (!res.ok) {
-        setBackupResult({ text: res.error, isError: true })
+  const backupAction = useAction<[]>(() =>
+    Effect.gen(function* () {
+      setBackupResult(undefined)
+      const client = yield* PorterClient
+      const result = yield* Effect.result(
+        client.request({ type: 'porter/backup-drive', docIds: docs.map((doc) => doc.id) }),
+      )
+      if (Result.isFailure(result)) {
+        setBackupResult({ text: result.failure.reason, isError: true })
         return
       }
-      const outcomes = res.backup ?? []
+      const outcomes = result.success.backup
       const failed = outcomes.find((o) => !o.ok)
       const okCount = outcomes.filter((o) => o.ok).length
       setBackupResult(
@@ -159,17 +176,47 @@ export function App() {
           ? { text: failed.error ?? 'Backup failed', isError: true }
           : { text: `${okCount} backed up to Drive`, isError: false },
       )
-    } finally {
-      setBackupBusy(false)
-    }
+    }),
+  )
+
+  function selectAccount(authuser: number) {
+    return popupRuntime.runPromise(
+      Effect.gen(function* () {
+        const client = yield* PorterClient
+        const result = yield* Effect.result(
+          client.request({ type: 'porter/update-settings', patch: { nblmAuthuser: authuser } }),
+        )
+        if (Result.isSuccess(result)) setSettings(result.success.settings)
+      }),
+    )
+  }
+
+  function updateDriveClientId(driveClientId: string) {
+    return popupRuntime.runPromise(
+      Effect.gen(function* () {
+        const client = yield* PorterClient
+        const result = yield* Effect.result(
+          client.request({ type: 'porter/update-settings', patch: { driveClientId } }),
+        )
+        if (Result.isSuccess(result)) setSettings(result.success.settings)
+      }),
+    )
   }
 
   async function copyDebugLog() {
-    const res = await sendMessage({ type: 'porter/debug-log' })
-    if (!res.ok) {
-      setDebugCopyStatus(res.error)
+    const result = await popupRuntime.runPromise(
+      Effect.result(
+        Effect.gen(function* () {
+          const client = yield* PorterClient
+          const { debugLog } = yield* client.request({ type: 'porter/debug-log' })
+          return debugLog
+        }),
+      ),
+    )
+    if (Result.isFailure(result)) {
+      setDebugCopyStatus(result.failure.reason)
     } else {
-      const entries = res.debugLog ?? []
+      const entries = result.success
       await navigator.clipboard.writeText(JSON.stringify(entries, null, 2))
       setDebugCopyStatus(`copied (${entries.length} entries)`)
     }
@@ -200,10 +247,10 @@ export function App() {
               ? 'text-gray-500 disabled:opacity-50'
               : 'text-blue-600 disabled:opacity-50'
           }
-          disabled={accountsBusy}
-          onClick={() => void refreshAccounts()}
+          disabled={accountsAction.busy}
+          onClick={() => accountsAction.run()}
         >
-          {accountsBusy
+          {accountsAction.busy
             ? 'Finding accounts…'
             : settings.accounts.length > 0
               ? '↻'
@@ -214,15 +261,15 @@ export function App() {
         <button
           type="button"
           class="mb-3 w-full rounded bg-blue-600 px-3 py-2 text-white disabled:opacity-50"
-          disabled={busy}
-          onClick={() => void capture()}
+          disabled={captureAction.busy}
+          onClick={() => captureAction.run()}
         >
-          {busy ? 'Capturing…' : capturable}
+          {captureAction.busy ? 'Capturing…' : capturable}
         </button>
       ) : (
         <p class="mb-3 text-gray-500">Nothing capturable on this page.</p>
       )}
-      {error && <p class="mb-3 text-red-600">{error}</p>}
+      {captureAction.error && <p class="mb-3 text-red-600">{captureAction.error}</p>}
       <ul class="space-y-2">
         {docs.map((doc) => (
           <li key={doc.id} class="rounded border border-gray-200 p-2">
@@ -252,10 +299,29 @@ export function App() {
               <button
                 type="button"
                 class="text-gray-500 disabled:opacity-50"
-                disabled={notebooksBusy}
-                onClick={() => void loadNotebooks()}
+                disabled={loadNotebooksAction.busy}
+                onClick={() => loadNotebooksAction.run()}
               >
-                {notebooksBusy ? 'Loading…' : '↻'}
+                {loadNotebooksAction.busy ? 'Loading…' : '↻'}
+              </button>
+            </div>
+          )}
+          {settings.accounts.length > 0 && (
+            <div class="mt-2 flex items-center gap-2">
+              <input
+                type="text"
+                class="flex-1 rounded border border-gray-200 px-2 py-1 text-sm"
+                placeholder="New notebook title…"
+                value={newNotebookTitle}
+                onChange={(e) => setNewNotebookTitle(e.currentTarget.value)}
+              />
+              <button
+                type="button"
+                class="rounded border border-gray-300 px-2 py-1 text-gray-700 disabled:opacity-50"
+                disabled={createNotebookAction.busy || newNotebookTitle.trim() === ''}
+                onClick={() => createNotebookAction.run()}
+              >
+                {createNotebookAction.busy ? 'Creating…' : 'Create'}
               </button>
             </div>
           )}
@@ -263,10 +329,10 @@ export function App() {
           <button
             type="button"
             class="mt-2 w-full rounded bg-blue-600 px-3 py-2 text-white disabled:opacity-50"
-            disabled={ingestBusy || selectedNotebookId === ''}
-            onClick={() => void ingest()}
+            disabled={ingestAction.busy || selectedNotebookId === ''}
+            onClick={() => ingestAction.run()}
           >
-            {ingestBusy ? 'Sending…' : 'Send to NotebookLM'}
+            {ingestAction.busy ? 'Sending…' : 'Send to NotebookLM'}
           </button>
           {ingestResult && (
             <p class={`mt-1 text-xs ${ingestResult.isError ? 'text-red-600' : 'text-gray-500'}`}>
@@ -276,10 +342,10 @@ export function App() {
           <button
             type="button"
             class="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-gray-700 disabled:opacity-50"
-            disabled={backupBusy}
-            onClick={() => void backupToDrive()}
+            disabled={backupAction.busy}
+            onClick={() => backupAction.run()}
           >
-            {backupBusy ? 'Backing up…' : 'Back up to Drive'}
+            {backupAction.busy ? 'Backing up…' : 'Back up to Drive'}
           </button>
           {backupResult && (
             <p class={`mt-1 text-xs ${backupResult.isError ? 'text-red-600' : 'text-gray-500'}`}>

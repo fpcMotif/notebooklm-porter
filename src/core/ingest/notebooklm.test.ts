@@ -6,7 +6,14 @@ import type { SourceDoc } from '../model/types'
 import { ingestIntoNotebook } from './notebooklm'
 import { RPC_IDS } from './rpc/protocol'
 
-const NoopDebugLive = Layer.succeed(DebugLog, DebugLog.of({ log: () => Effect.void }))
+const NoopDebugLive = Layer.succeed(
+  DebugLog,
+  DebugLog.of({
+    log: () => Effect.void,
+    entries: () => Effect.succeed([]),
+    clear: () => Effect.void,
+  }),
+)
 
 const LOGGED_IN_HOME = '"SNlM0e":"csrf-token-1"...."FdrFJe":"fsid-1"'
 

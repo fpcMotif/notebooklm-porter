@@ -3,9 +3,15 @@
  * touched in the fx module. Pure logic lives in services.ts.
  */
 import { Effect, Layer } from 'effect'
-import { dbg } from '../debug'
-import { DriveAuthError, StorageError } from './errors'
-import { Http, Identity, Kv, DebugLog, makeHttp } from './services'
+import { clearDebugLog, dbg, getDebugLog } from '../debug'
+import {
+  PorterClient,
+  type PorterMessage,
+  type PorterReply,
+  type PorterResponseMap,
+} from '../messaging'
+import { DriveAuthError, IpcError, StorageError } from './errors'
+import { Http, Identity, Kv, DebugLog, Tabs, makeHttp } from './services'
 
 export const HttpLive = Layer.succeed(Http, makeHttp(fetch))
 
@@ -50,7 +56,64 @@ export const DebugLive = Layer.succeed(
   DebugLog,
   DebugLog.of({
     log: (scope, msg, data) => Effect.sync(() => dbg(scope, msg, data)),
+    entries: () =>
+      Effect.tryPromise({
+        try: () => getDebugLog(),
+        catch: (cause) => new StorageError({ key: 'porter/debug', cause }),
+      }),
+    clear: () =>
+      Effect.tryPromise({
+        try: () => clearDebugLog(),
+        catch: (cause) => new StorageError({ key: 'porter/debug', cause }),
+      }),
   }),
 )
 
-export const PorterLive = Layer.mergeAll(HttpLive, KvLive, IdentityLive, DebugLive)
+export const TabsLive = Layer.succeed(
+  Tabs,
+  Tabs.of({
+    activeTab: () =>
+      Effect.tryPromise({
+        try: async () => {
+          const [tab] = await browser.tabs.query({ active: true, currentWindow: true })
+          return {
+            ...(tab?.id !== undefined ? { id: tab.id } : {}),
+            ...(tab?.url !== undefined ? { url: tab.url } : {}),
+          }
+        },
+        catch: (cause) => new IpcError({ reason: String(cause) }),
+      }),
+    sendMessage: (tabId, msg) =>
+      Effect.tryPromise({
+        try: () => browser.tabs.sendMessage(tabId, msg),
+        catch: (cause) => new IpcError({ reason: String(cause) }),
+      }),
+  }),
+)
+
+export const PorterLive = Layer.mergeAll(HttpLive, KvLive, IdentityLive, DebugLive, TabsLive)
+
+export const PorterClientLive = Layer.succeed(
+  PorterClient,
+  PorterClient.of({
+    request: <K extends PorterMessage['type']>(msg: Extract<PorterMessage, { type: K }>) =>
+      Effect.gen(function* () {
+        const reply = yield* Effect.tryPromise({
+          try: () => browser.runtime.sendMessage(msg) as Promise<PorterReply<K>>,
+          catch: (cause) => new IpcError({ reason: String(cause) }),
+        })
+        if (!reply.ok) {
+          return yield* Effect.fail(new IpcError({ reason: reply.error }))
+        }
+        const { ok: _ok, ...payload } = reply
+        // Documented cast: TS can't carry the `Omit<..., 'ok'>` shape through the
+        // generic `K` back to `PorterResponseMap[K]` — this is the only remaining
+        // cast on the popup↔background wire (the transport cast above is the other).
+        return payload as unknown as PorterResponseMap[K]
+      }),
+  }),
+)
+
+/** Everything the popup runtime provides. */
+export const PopupLive = Layer.mergeAll(PorterClientLive, TabsLive)
+export type PopupServices = PorterClient | Tabs

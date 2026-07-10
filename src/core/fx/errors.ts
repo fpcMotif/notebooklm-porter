@@ -1,6 +1,7 @@
 /**
  * Tagged error taxonomy for the Effect fx layer (design §4). This is the
- * COMPLETE set — later stages must not add more without need.
+ * COMPLETE set (including `IpcError` for the popup/background transport) —
+ * later stages must not add more without need.
  */
 import { Data } from 'effect'
 
@@ -47,6 +48,11 @@ export class ExtractionError extends Data.TaggedError('ExtractionError')<{
   reason: string
 }> {}
 
+/** runtime.sendMessage / tabs.sendMessage transport failure. */
+export class IpcError extends Data.TaggedError('IpcError')<{
+  reason: string
+}> {}
+
 export type PorterError =
   | FetchError
   | HttpStatusError
@@ -57,3 +63,4 @@ export type PorterError =
   | DriveApiError
   | StorageError
   | ExtractionError
+  | IpcError

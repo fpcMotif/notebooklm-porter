@@ -28,6 +28,8 @@ const NoopDebugLog = Layer.succeed(
   DebugLog,
   DebugLog.of({
     log: () => Effect.void,
+    entries: () => Effect.succeed([]),
+    clear: () => Effect.void,
   }),
 )
 
