@@ -27,7 +27,7 @@ describe('hasMessageType', () => {
   })
 
   it('does not match a different type', () => {
-    expect(hasMessageType({ type: 'porter/ingest-doc' }, 'porter/extract-thread')).toBe(false)
+    expect(hasMessageType({ type: 'porter/dom-deliver' }, 'porter/extract-thread')).toBe(false)
   })
 
   it('rejects a non-object value', () => {

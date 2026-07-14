@@ -124,7 +124,11 @@ in the UI:
 - Distinguish **not-logged-in** (no CSRF token / 401) from **protocol-drift**
   (200 but unparseable envelope) from **quota** (source-cap error) — surface each
   distinctly to the user. jetpack collapses all of these to "empty array"; we must not.
-- On any Tier-A failure, **auto-fall-back to Tier B**, and tell the user which tier ran.
+- Use a read-only `listNotebooks` canary to detect protocol drift before a
+  source mutation, then auto-fall-back to Tier B. Once an add-source RPC has
+  started, never auto-fall-back from its failure: the source may have been
+  created before a network or parsing failure, so it must remain explicit
+  uncertainty instead of risking a duplicate.
 
 ### Tier B — DOM automation on an open NBLM tab (fallback)
 

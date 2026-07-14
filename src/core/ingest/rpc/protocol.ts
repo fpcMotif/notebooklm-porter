@@ -9,11 +9,19 @@
  * rejected by the server.
  */
 
+import { type NotebookSource, sourceKindFromCode, sourceStatusFromCode } from '../sources/model'
+
 export const RPC_IDS = {
   addSource: 'izAoDd',
   addSourceFile: 'o4cbdc',
   listNotebooks: 'wXbhsf',
   createNotebook: 'CCqFvf',
+  /** Fetch one notebook incl. its source rows (source-console list). */
+  getNotebook: 'rLM1Ne',
+  /** Remove one source from a notebook (source-console dedup). */
+  deleteSource: 'tGMBJ',
+  /** Re-fetch one URL/Drive source in place (source-console retry). */
+  refreshSource: 'FLmJqe',
 } as const
 
 const ANTI_XSSI_PREFIX = ")]}'"
@@ -86,6 +94,88 @@ export function addTextSourceParams(notebookId: string, title: string, content: 
     notebookId,
     TEMPLATE_BLOCK,
   ]
+}
+
+/** GET_NOTEBOOK (rLM1Ne) params — fetch one notebook incl. its source rows. */
+export function getNotebookParams(notebookId: string): unknown[] {
+  return [notebookId, null, [2], null, 0]
+}
+
+/** DELETE_SOURCE (tGMBJ) params — remove one source by id. */
+export function deleteSourceParams(sourceId: string): unknown[] {
+  return [[[sourceId]]]
+}
+
+/** REFRESH_SOURCE (FLmJqe) params — re-fetch one URL/Drive source by id. */
+export function refreshSourceParams(sourceId: string): unknown[] {
+  return [null, [sourceId], [2]]
+}
+
+function asArray(value: unknown): unknown[] | undefined {
+  return Array.isArray(value) ? value : undefined
+}
+
+/**
+ * Source-id envelope variants at `entry[0]`: bare `"id"`, typical `["id"]`, or
+ * drive-backed `[null, true, ["id"]]`. Returns the id string or undefined.
+ */
+function extractSourceId(envelope: unknown): string | undefined {
+  if (typeof envelope === 'string') return envelope
+  const arr = asArray(envelope)
+  if (arr === undefined) return undefined
+  const plain = arr[0]
+  if (typeof plain === 'string') return plain
+  const driveInner = asArray(arr[2])?.[0]
+  return typeof driveInner === 'string' ? driveInner : undefined
+}
+
+/** Canonical URL from `metadata[7][0]`, falling back to the youtube block `metadata[5][0]`. */
+function extractSourceUrl(metadata: unknown[] | undefined): string | undefined {
+  const canonical = asArray(metadata?.[7])?.[0]
+  if (typeof canonical === 'string' && canonical !== '') return canonical
+  const youtube = asArray(metadata?.[5])?.[0]
+  if (typeof youtube === 'string' && youtube !== '') return youtube
+  return undefined
+}
+
+function parseSourceRow(entry: unknown): NotebookSource | undefined {
+  const arr = asArray(entry)
+  if (arr === undefined || arr.length === 0) return undefined
+  const id = extractSourceId(arr[0])
+  if (id === undefined || id === '') return undefined
+
+  const rawTitle = arr[1]
+  const title = typeof rawTitle === 'string' ? rawTitle : ''
+  const metadata = asArray(arr[2])
+  const url = extractSourceUrl(metadata)
+  const createdAt = asArray(metadata?.[2])?.[0]
+
+  return {
+    id,
+    title,
+    kind: sourceKindFromCode(metadata?.[4]),
+    status: sourceStatusFromCode(asArray(arr[3])?.[1]),
+    ...(url !== undefined ? { url } : {}),
+    ...(typeof createdAt === 'number' ? { createdAt } : {}),
+  }
+}
+
+/**
+ * Extracts a notebook's source rows from a GET_NOTEBOOK (rLM1Ne) result. The
+ * rows live at `result[0][1]`; a genuinely empty notebook elides that slot
+ * (`null`) and yields `[]`. Malformed rows are skipped rather than throwing, so
+ * a partial list still surfaces — mirroring `parseNotebookList`.
+ */
+export function parseNotebookSources(result: unknown): NotebookSource[] {
+  const info = asArray(asArray(result)?.[0])
+  const rows = asArray(info?.[1])
+  if (rows === undefined) return []
+  const sources: NotebookSource[] = []
+  for (const row of rows) {
+    const parsed = parseSourceRow(row)
+    if (parsed !== undefined) sources.push(parsed)
+  }
+  return sources
 }
 
 /**

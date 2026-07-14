@@ -6,22 +6,95 @@ import {
   buildEnvelope,
   buildRpcUrl,
   createNotebookParams,
+  deleteSourceParams,
+  getNotebookParams,
   homeUrl,
   listNotebooksParams,
   parseBatchexecuteResponse,
   parseNotebookList,
+  parseNotebookSources,
+  refreshSourceParams,
   RPC_IDS,
   TEMPLATE_BLOCK,
 } from './protocol'
 
 describe('RPC_IDS', () => {
-  it('pins the four RPC ids used by the ingest client', () => {
+  it('pins the RPC ids used by the ingest + source-console client', () => {
     expect(RPC_IDS).toEqual({
       addSource: 'izAoDd',
       addSourceFile: 'o4cbdc',
       listNotebooks: 'wXbhsf',
       createNotebook: 'CCqFvf',
+      getNotebook: 'rLM1Ne',
+      deleteSource: 'tGMBJ',
+      refreshSource: 'FLmJqe',
     })
+  })
+})
+
+describe('source-console params', () => {
+  it('builds GET_NOTEBOOK params for a notebook id', () => {
+    expect(getNotebookParams('nb-1')).toEqual(['nb-1', null, [2], null, 0])
+  })
+
+  it('builds DELETE_SOURCE params for a source id', () => {
+    expect(deleteSourceParams('src-1')).toEqual([[['src-1']]])
+  })
+
+  it('builds REFRESH_SOURCE params for a source id', () => {
+    expect(refreshSourceParams('src-1')).toEqual([null, ['src-1'], [2]])
+  })
+})
+
+describe('parseNotebookSources', () => {
+  // GET_NOTEBOOK result: sources live at result[0][1]; each entry is
+  // [idEnvelope, title, metadata, statusBlock]. metadata[4]=type, [7][0]/[5][0]=url,
+  // [2][0]=created ts; statusBlock[1]=status code.
+  const result = [
+    [
+      'notebook-meta',
+      [
+        [
+          ['src-web'],
+          'A web page',
+          [null, null, [1700000000], null, 5, null, null, ['https://example.com/a']],
+          [null, 2],
+        ],
+        [['src-yt'], 'A video', [null, null, null, null, 9, ['https://youtu.be/abc']], [null, 3]],
+        [[null, true, ['src-drive']], 'A doc', [null, null, null, null, 1], [null, 1]],
+        'malformed-row',
+      ],
+    ],
+  ]
+
+  it('decodes id, title, url, kind, status, and createdAt across id-envelope shapes', () => {
+    expect(parseNotebookSources(result)).toEqual([
+      {
+        id: 'src-web',
+        title: 'A web page',
+        kind: 'web_page',
+        status: 'ready',
+        url: 'https://example.com/a',
+        createdAt: 1700000000,
+      },
+      {
+        id: 'src-yt',
+        title: 'A video',
+        kind: 'youtube',
+        status: 'error',
+        url: 'https://youtu.be/abc',
+      },
+      { id: 'src-drive', title: 'A doc', kind: 'google_docs', status: 'processing' },
+    ])
+  })
+
+  it('returns [] for a genuinely empty notebook (null sources slot)', () => {
+    expect(parseNotebookSources([['notebook-meta', null]])).toEqual([])
+  })
+
+  it('returns [] for a malformed top-level shape', () => {
+    expect(parseNotebookSources(null)).toEqual([])
+    expect(parseNotebookSources([['meta']])).toEqual([])
   })
 })
 

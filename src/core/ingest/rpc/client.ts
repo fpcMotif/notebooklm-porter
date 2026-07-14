@@ -4,7 +4,7 @@
  * credentials, retry/timeout policy, and distinguishing not-logged-in from a
  * bad HTTP response or a drifted wire protocol (design §4).
  */
-import { Effect, Result, Schedule } from 'effect'
+import { Duration, Effect, Result, Schedule } from 'effect'
 import { parseNblmHome } from '../../accounts/parse'
 import { redact } from '../../debug'
 import {
@@ -14,7 +14,8 @@ import {
   ProtocolDrift,
   RpcRefused,
 } from '../../fx/errors'
-import { DebugLog, Http } from '../../fx/services'
+import { DebugLog, Http, withHttpTimeout } from '../../fx/services'
+import type { NotebookSource } from '../sources/model'
 import {
   addTextSourceParams,
   addUrlSourceParams,
@@ -22,16 +23,21 @@ import {
   buildEnvelope,
   buildRpcUrl,
   createNotebookParams,
+  deleteSourceParams,
+  getNotebookParams,
   homeUrl,
   listNotebooksParams,
   parseBatchexecuteResponse,
   parseNotebookList,
+  parseNotebookSources,
+  refreshSourceParams,
   RPC_IDS,
 } from './protocol'
 
 export interface NblmSession {
   csrfToken: string
   fSid?: string
+  email?: string
 }
 
 function notebookSourcePath(notebookId: string): string {
@@ -44,20 +50,31 @@ export const fetchSession = (
   Effect.gen(function* () {
     const http = yield* Http
     const debugLog = yield* DebugLog
-    const html = yield* http.text(homeUrl(authuser), { credentials: 'include' })
+    const url = homeUrl(authuser)
+    const [elapsed, html] = yield* Effect.timed(
+      withHttpTimeout(http.text(url, { credentials: 'include' }), url),
+    )
     const parsed = parseNblmHome(html)
-    yield* debugLog.log('rpc', 'session', {
-      authuser,
-      loggedIn: parsed.loggedIn,
-      hasCsrf: parsed.csrfToken !== undefined,
-      hasFsid: parsed.fSid !== undefined,
-    })
+    const loggedIn = parsed.loggedIn && parsed.csrfToken !== undefined
+    yield* debugLog.log(
+      'rpc',
+      'session',
+      {
+        authuser,
+        loggedIn: parsed.loggedIn,
+        hasCsrf: parsed.csrfToken !== undefined,
+        hasFsid: parsed.fSid !== undefined,
+        hasEmail: parsed.email !== undefined,
+      },
+      { elapsedMs: Math.round(Duration.toMillis(elapsed)), ...(loggedIn ? {} : { level: 'warn' }) },
+    )
     if (!parsed.loggedIn || parsed.csrfToken === undefined) {
       return yield* Effect.fail(new NotLoggedIn({ authuser }))
     }
     return {
       csrfToken: parsed.csrfToken,
       ...(parsed.fSid !== undefined ? { fSid: parsed.fSid } : {}),
+      ...(parsed.email !== undefined ? { email: parsed.email } : {}),
     }
   })
 
@@ -93,6 +110,7 @@ export function rpcCall(
   session: NblmSession,
   authuser: number,
   sourcePath?: string,
+  opts: { retry?: boolean } = {},
 ): Effect.Effect<
   unknown,
   FetchError | HttpStatusError | ProtocolDrift | RpcRefused,
@@ -109,47 +127,72 @@ export function rpcCall(
     const http = yield* Http
     const debugLog = yield* DebugLog
 
-    const textResult = yield* Effect.result(
-      http.text(url, {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
-        body: buildEnvelope(rpcId, params, session.csrfToken),
-      }),
+    const [elapsed, textResult] = yield* Effect.timed(
+      Effect.result(
+        http.text(url, {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+          body: buildEnvelope(rpcId, params, session.csrfToken),
+        }),
+      ),
     )
+    const elapsedMs = Math.round(Duration.toMillis(elapsed))
     if (Result.isFailure(textResult)) {
-      yield* debugLog.log('rpc', `${rpcId} failed`, { error: String(textResult.failure) })
+      yield* debugLog.log(
+        'rpc',
+        `${rpcId} failed`,
+        { error: String(textResult.failure) },
+        { level: 'warn', elapsedMs },
+      )
       return yield* Effect.fail(textResult.failure)
     }
     const text = textResult.success
 
     const parseResult = yield* Effect.result(parseResponse(text, rpcId))
     if (Result.isFailure(parseResult)) {
-      yield* debugLog.log('rpc', rpcId, {
-        url: redact(url),
-        resultKind: 'placeholder-null',
-        responseHead: text.slice(0, 300),
-      })
-      yield* debugLog.log('rpc', `${rpcId} failed`, { error: String(parseResult.failure) })
+      yield* debugLog.log(
+        'rpc',
+        rpcId,
+        {
+          url: redact(url),
+          resultKind: 'placeholder-null',
+          responseHead: text.slice(0, 300),
+        },
+        { elapsedMs },
+      )
+      yield* debugLog.log(
+        'rpc',
+        `${rpcId} failed`,
+        { error: String(parseResult.failure) },
+        { level: 'warn', elapsedMs },
+      )
       return yield* Effect.fail(parseResult.failure)
     }
     const result = parseResult.success
 
-    yield* debugLog.log('rpc', rpcId, {
-      url: redact(url),
-      resultKind: result === null ? 'placeholder-null' : 'payload',
-    })
+    yield* debugLog.log(
+      'rpc',
+      rpcId,
+      {
+        url: redact(url),
+        resultKind: result === null ? 'placeholder-null' : 'payload',
+      },
+      { elapsedMs },
+    )
     return result
   })
 
-  return Effect.retry(attempt, {
-    schedule: rpcRetrySchedule,
-    while: (err) =>
-      err instanceof ProtocolDrift || err instanceof RpcRefused ? false : isRetryable(err),
-  }).pipe(
-    Effect.timeout('20 seconds'),
-    Effect.catchTag('TimeoutError', () => Effect.fail(new FetchError({ url, cause: 'timeout' }))),
-  )
+  const request =
+    opts.retry === false
+      ? attempt
+      : Effect.retry(attempt, {
+          schedule: rpcRetrySchedule,
+          while: (err) =>
+            err instanceof ProtocolDrift || err instanceof RpcRefused ? false : isRetryable(err),
+        })
+
+  return withHttpTimeout(request, url)
 }
 
 export function listNotebooks(
@@ -174,7 +217,9 @@ export function createNotebook(
   FetchError | HttpStatusError | ProtocolDrift | RpcRefused,
   Http | DebugLog
 > {
-  return rpcCall(RPC_IDS.createNotebook, createNotebookParams(title), session, authuser, '/')
+  return rpcCall(RPC_IDS.createNotebook, createNotebookParams(title), session, authuser, '/', {
+    retry: false,
+  })
 }
 
 export function addYoutubeSource(
@@ -193,6 +238,7 @@ export function addYoutubeSource(
     session,
     authuser,
     notebookSourcePath(notebookId),
+    { retry: false },
   )
 }
 
@@ -212,6 +258,7 @@ export function addUrlSource(
     session,
     authuser,
     notebookSourcePath(notebookId),
+    { retry: false },
   )
 }
 
@@ -232,5 +279,70 @@ export function addTextSource(
     session,
     authuser,
     notebookSourcePath(notebookId),
+    { retry: false },
+  )
+}
+
+/** Lists the source rows inside one notebook (GET_NOTEBOOK), decoded to the domain model. */
+export function listSources(
+  notebookId: string,
+  session: NblmSession,
+  authuser: number,
+): Effect.Effect<
+  NotebookSource[],
+  FetchError | HttpStatusError | ProtocolDrift | RpcRefused,
+  Http | DebugLog
+> {
+  return rpcCall(
+    RPC_IDS.getNotebook,
+    getNotebookParams(notebookId),
+    session,
+    authuser,
+    notebookSourcePath(notebookId),
+  ).pipe(Effect.map(parseNotebookSources))
+}
+
+/**
+ * Removes one source from a notebook (DELETE_SOURCE). Idempotent server-side —
+ * deleting an already-absent source succeeds — so the default 5xx/429 retry is
+ * left on; a placeholder-null response is the accepted success shape.
+ */
+export function deleteSource(
+  notebookId: string,
+  sourceId: string,
+  session: NblmSession,
+  authuser: number,
+): Effect.Effect<
+  unknown,
+  FetchError | HttpStatusError | ProtocolDrift | RpcRefused,
+  Http | DebugLog
+> {
+  return rpcCall(
+    RPC_IDS.deleteSource,
+    deleteSourceParams(sourceId),
+    session,
+    authuser,
+    notebookSourcePath(notebookId),
+  )
+}
+
+/** Re-fetches one URL/Drive source in place (REFRESH_SOURCE) — the console's retry. */
+export function refreshSource(
+  notebookId: string,
+  sourceId: string,
+  session: NblmSession,
+  authuser: number,
+): Effect.Effect<
+  unknown,
+  FetchError | HttpStatusError | ProtocolDrift | RpcRefused,
+  Http | DebugLog
+> {
+  return rpcCall(
+    RPC_IDS.refreshSource,
+    refreshSourceParams(sourceId),
+    session,
+    authuser,
+    notebookSourcePath(notebookId),
+    { retry: false },
   )
 }

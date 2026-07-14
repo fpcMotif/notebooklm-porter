@@ -14,6 +14,8 @@ export interface RawTweet {
   /** Plain text, already de-duplicated of the DOM's own emoji/newline markup. */
   text: string
   timestamp?: string
+  /** GraphQL conversation root; absent for DOM-only rows. */
+  conversationId?: string
   /** Author + text of a quote-tweet embed, when this tweet quotes another. */
   quotedAuthorHandle?: string
   quotedText?: string

@@ -43,6 +43,12 @@ export class StorageError extends Data.TaggedError('StorageError')<{
   cause: unknown
 }> {}
 
+/** browser.alarms scheduling or clearing failure. */
+export class AlarmError extends Data.TaggedError('AlarmError')<{
+  operation: 'schedule' | 'clear'
+  cause: unknown
+}> {}
+
 export class ExtractionError extends Data.TaggedError('ExtractionError')<{
   url: string
   reason: string
@@ -63,4 +69,5 @@ export type PorterError =
   | DriveApiError
   | StorageError
   | ExtractionError
+  | AlarmError
   | IpcError

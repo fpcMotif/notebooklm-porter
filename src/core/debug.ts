@@ -10,14 +10,35 @@
  * glue split).
  */
 
+export type DebugLevel = 'info' | 'warn' | 'error'
+
 export interface DebugEntry {
   t: string
   scope: string
   msg: string
+  /** Omitted for the common `info` case to keep entries small and back-compatible. */
+  level?: DebugLevel
+  /** Wall-clock duration of a timed operation, when the caller measured one. */
+  elapsedMs?: number
+  /** Correlation id tying a burst of entries together (one queue job, one capture). */
+  run?: string
   data?: unknown
 }
 
+/** Optional per-call metadata; all fields default to absent. */
+export interface DebugMeta {
+  level?: DebugLevel
+  elapsedMs?: number
+  run?: string
+}
+
 const RING_KEY = 'porter/debug'
+/**
+ * Ring size for live writes. Deliberately larger than appendEntry's tested
+ * default (100): a single playlist ingest can emit dozens of per-unit/per-tier
+ * entries and must not evict its own opening session/route lines.
+ */
+const RING_CAP = 500
 
 /** Appends `entry`, dropping the oldest entries past `cap`. Never mutates `ring`. */
 export function appendEntry(ring: DebugEntry[], entry: DebugEntry, cap = 100): DebugEntry[] {
@@ -73,15 +94,30 @@ let writeChain: Promise<void> = Promise.resolve()
  * Logs to the console AND persists to storage.local, fire-and-forget.
  * Writes are serialized through a module-level chain so concurrent dbg
  * calls read-modify-write the ring without clobbering each other.
+ *
+ * `meta.level` routes the console sink (warn/error stand out) and is stored so
+ * the popup viewer can colour and filter; `info` is left implicit. `elapsedMs`
+ * and `run` are recorded when the caller supplies them.
  */
-export function dbg(scope: string, msg: string, data?: unknown): void {
+export function dbg(scope: string, msg: string, data?: unknown, meta: DebugMeta = {}): void {
   const safeData = data !== undefined ? redact(jsonSafe(data)) : undefined
-  console.log('[porter]', scope, msg, safeData ?? '')
+  const level = meta.level ?? 'info'
+  const sink = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log
+  sink(
+    '[porter]',
+    scope,
+    msg,
+    ...(meta.elapsedMs !== undefined ? [`(${meta.elapsedMs}ms)`] : []),
+    safeData ?? '',
+  )
 
   const entry: DebugEntry = {
     t: new Date().toISOString(),
     scope,
     msg,
+    ...(level !== 'info' ? { level } : {}),
+    ...(meta.elapsedMs !== undefined ? { elapsedMs: meta.elapsedMs } : {}),
+    ...(meta.run !== undefined ? { run: meta.run } : {}),
     ...(safeData !== undefined ? { data: safeData } : {}),
   }
 
@@ -89,7 +125,7 @@ export function dbg(scope: string, msg: string, data?: unknown): void {
     .then(async () => {
       const got = await browser.storage.local.get(RING_KEY)
       const ring = (got[RING_KEY] ?? []) as DebugEntry[]
-      return browser.storage.local.set({ [RING_KEY]: appendEntry(ring, entry) })
+      return browser.storage.local.set({ [RING_KEY]: appendEntry(ring, entry, RING_CAP) })
     })
     .catch(() => {
       // Debug logging must never throw into caller code paths.

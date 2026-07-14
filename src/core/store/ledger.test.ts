@@ -1,5 +1,7 @@
+import { Effect } from 'effect'
 import { describe, expect, it } from 'vitest'
-import { contentHash, diffAgainstLedger, recordSynced, type Ledger } from './ledger'
+import { kvTest } from '../fx/testing'
+import { contentHash, diffAgainstLedger, loadLedger, recordSynced, type Ledger } from './ledger'
 
 describe('diffAgainstLedger', () => {
   it('classifies docs missing from the ledger as fresh', () => {
@@ -193,5 +195,38 @@ describe('contentHash', () => {
 
   it('produces different hashes for different-length inputs sharing a prefix', () => {
     expect(contentHash('abc')).not.toBe(contentHash('abcd'))
+  })
+})
+
+describe('loadLedger', () => {
+  it('returns an empty ledger when persisted storage has an invalid nested entry', async () => {
+    const ledger = await Effect.runPromise(
+      loadLedger().pipe(
+        Effect.provide(
+          kvTest({
+            'porter/ledger': {
+              nb1: {
+                'reddit:abc': { contentHash: 42, lastSynced: '2026-07-11T00:00:00.000Z' },
+              },
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(ledger).toEqual({})
+  })
+
+  it('returns a valid persisted ledger unchanged', async () => {
+    const stored: Ledger = {
+      nb1: {
+        'reddit:abc': { contentHash: 'h1', lastSynced: '2026-07-11T00:00:00.000Z' },
+      },
+    }
+    const ledger = await Effect.runPromise(
+      loadLedger().pipe(Effect.provide(kvTest({ 'porter/ledger': stored }))),
+    )
+
+    expect(ledger).toEqual(stored)
   })
 })

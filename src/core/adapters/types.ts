@@ -7,7 +7,10 @@ import type { Capture, SiteId } from '../model/types'
  * What a URL offers for capture, decided synchronously from the URL alone
  * so the popup can label its button without touching the page.
  */
-export type Capturable = { kind: 'thread'; label: string } | { kind: 'playlist'; label: string }
+export type Capturable =
+  | { kind: 'thread'; label: string }
+  | { kind: 'playlist'; label: string }
+  | { kind: 'video'; label: string }
 
 /**
  * One platform's capture strategy. Two capture paths exist and an adapter

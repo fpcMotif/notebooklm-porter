@@ -11,7 +11,20 @@ import {
   type PorterResponseMap,
 } from '../messaging'
 import { DriveAuthError, IpcError, StorageError } from './errors'
-import { Http, Identity, Kv, DebugLog, Tabs, makeHttp } from './services'
+import {
+  Alarms,
+  DebugLog,
+  DomTabs,
+  Http,
+  Identity,
+  Kv,
+  Scripting,
+  Tabs,
+  makeAlarms,
+  makeDomTabs,
+  makeHttp,
+  makeScripting,
+} from './services'
 
 export const HttpLive = Layer.succeed(Http, makeHttp(fetch))
 
@@ -55,7 +68,7 @@ export const IdentityLive = Layer.succeed(
 export const DebugLive = Layer.succeed(
   DebugLog,
   DebugLog.of({
-    log: (scope, msg, data) => Effect.sync(() => dbg(scope, msg, data)),
+    log: (scope, msg, data, meta) => Effect.sync(() => dbg(scope, msg, data, meta)),
     entries: () =>
       Effect.tryPromise({
         try: () => getDebugLog(),
@@ -91,7 +104,25 @@ export const TabsLive = Layer.succeed(
   }),
 )
 
-export const PorterLive = Layer.mergeAll(HttpLive, KvLive, IdentityLive, DebugLive, TabsLive)
+export const DomTabsLive = Layer.succeed(DomTabs, DomTabs.of(makeDomTabs(browser.tabs)))
+
+export const ScriptingLive = Layer.succeed(
+  Scripting,
+  Scripting.of(makeScripting(browser.scripting)),
+)
+
+export const AlarmsLive = Layer.succeed(Alarms, Alarms.of(makeAlarms(browser.alarms)))
+
+export const PorterLive = Layer.mergeAll(
+  HttpLive,
+  KvLive,
+  IdentityLive,
+  DebugLive,
+  TabsLive,
+  DomTabsLive,
+  ScriptingLive,
+  AlarmsLive,
+)
 
 export const PorterClientLive = Layer.succeed(
   PorterClient,

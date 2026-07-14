@@ -1,7 +1,10 @@
 import { Effect, Result } from 'effect'
-import type { Capture, VideoEntry } from '../../model/types'
+import type { Capture, Playlist, VideoEntry } from '../../model/types'
 import { ExtractionError, type FetchError, type HttpStatusError } from '../../fx/errors'
-import { Http } from '../../fx/services'
+import { DebugLog, Http } from '../../fx/services'
+import { enrichPlaylistTranscripts } from './enrich'
+import { extractYtInitialPlayerResponse } from './transcript'
+import { standaloneYoutubeVideo, videoFromPlayerResponse, youtubeVideoIdentity } from './video'
 import {
   extractInnertube,
   extractYtInitialData,
@@ -11,9 +14,44 @@ import {
 
 const MAX_VIDEOS = 500
 
+export interface CapturePlaylistOptions {
+  /** Best-effort, bounded transcript snapshots for the playlist's first videos. */
+  enrichTranscripts?: boolean
+}
+
 /** `RD`/`UL`-prefixed `list=` ids are session-generated Mixes/Radios: no real `/playlist?list=` page exists for them. */
 export function isMixList(listId: string): boolean {
   return listId.startsWith('RD') || listId.startsWith('UL')
+}
+
+/** Selects the URL's natural capture shape without making adapter callers branch. */
+export function captureYoutube(
+  url: string,
+  options: CapturePlaylistOptions = {},
+): Effect.Effect<Capture, FetchError | HttpStatusError | ExtractionError, Http | DebugLog> {
+  return hasPlaylistParameter(url) ? capturePlaylist(url, options) : captureVideo(url)
+}
+
+/** Captures one canonical YouTube source; metadata extraction is best-effort only. */
+export function captureVideo(
+  url: string,
+): Effect.Effect<Capture, FetchError | HttpStatusError | ExtractionError, Http | DebugLog> {
+  return Effect.gen(function* () {
+    const identity = standaloneYoutubeVideo(url)
+    if (identity === undefined) {
+      return yield* Effect.fail(
+        new ExtractionError({ url, reason: 'not a standalone YouTube video URL' }),
+      )
+    }
+    const html = yield* fetchPageHtml(identity.url)
+    const video = videoFromPlayerResponse(extractYtInitialPlayerResponse(html), identity)
+    const debugLog = yield* DebugLog
+    yield* debugLog.log('youtube', 'video captured', {
+      videoId: video.videoId,
+      hasChannel: video.channel !== undefined,
+    })
+    return { kind: 'video', video }
+  })
 }
 
 /**
@@ -24,12 +62,14 @@ export function isMixList(listId: string): boolean {
  */
 export function capturePlaylist(
   url: string,
-): Effect.Effect<Capture, FetchError | HttpStatusError | ExtractionError, Http> {
+  options: CapturePlaylistOptions = {},
+): Effect.Effect<Capture, FetchError | HttpStatusError | ExtractionError, Http | DebugLog> {
   return Effect.gen(function* () {
     const playlistId = yield* extractPlaylistId(url)
+    const debugLog = yield* DebugLog
 
     if (isMixList(playlistId)) {
-      return yield* captureMixPlaylist(url, playlistId)
+      return yield* captureMixPlaylist(url, playlistId, options)
     }
 
     const pageUrl = `https://www.youtube.com/playlist?list=${playlistId}`
@@ -40,6 +80,18 @@ export function capturePlaylist(
       initialData,
       playlistId,
       pageUrl,
+    )
+    // 0 videos here means markup drift, NOT an empty playlist — the single
+    // most useful line for "why did my 300-video playlist come back short".
+    yield* debugLog.log(
+      'youtube',
+      'playlist first page parsed',
+      {
+        initialVideoCount: playlist.videos.length,
+        declaredVideoCount: playlist.videoCount,
+        hasContinuation: Boolean(firstContinuation),
+      },
+      { run: playlistId },
     )
 
     let continuation = firstContinuation
@@ -60,6 +112,12 @@ export function capturePlaylist(
         )
         if (next === undefined) {
           truncated = true
+          yield* debugLog.log(
+            'youtube',
+            'playlist continuation failed',
+            { videosSoFar: playlist.videos.length },
+            { run: playlistId, level: 'warn' },
+          )
           break
         }
         playlist.videos.push(...next.videos)
@@ -75,6 +133,15 @@ export function capturePlaylist(
       playlist.truncated = true
     }
 
+    yield* enrichPlaylistIfRequested(playlist, options)
+
+    yield* debugLog.log(
+      'youtube',
+      'playlist capture complete',
+      { videoCount: playlist.videos.length, truncated: playlist.truncated === true },
+      { run: playlistId },
+    )
+
     return { kind: 'playlist', playlist }
   })
 }
@@ -87,7 +154,8 @@ export function capturePlaylist(
 function captureMixPlaylist(
   url: string,
   playlistId: string,
-): Effect.Effect<Capture, FetchError | HttpStatusError | ExtractionError, Http> {
+  options: CapturePlaylistOptions,
+): Effect.Effect<Capture, FetchError | HttpStatusError | ExtractionError, Http | DebugLog> {
   return Effect.gen(function* () {
     const pageUrl = yield* cleanWatchUrl(url, playlistId)
     const html = yield* fetchPageHtml(pageUrl)
@@ -99,18 +167,38 @@ function captureMixPlaylist(
     playlist.videoCount = Math.max(playlist.videoCount, playlist.videos.length)
     playlist.truncated = true
 
+    yield* enrichPlaylistIfRequested(playlist, options)
+
+    const debugLog = yield* DebugLog
+    yield* debugLog.log(
+      'youtube',
+      'mix playlist captured',
+      { videoCount: playlist.videos.length },
+      { run: playlistId },
+    )
+
     return { kind: 'playlist', playlist }
+  })
+}
+
+function enrichPlaylistIfRequested(
+  playlist: Playlist,
+  options: CapturePlaylistOptions,
+): Effect.Effect<void, never, Http | DebugLog> {
+  if (!options.enrichTranscripts) return Effect.void
+  return Effect.gen(function* () {
+    const transcriptDocs = yield* enrichPlaylistTranscripts(playlist.videos)
+    if (transcriptDocs.length > 0) playlist.transcriptDocs = transcriptDocs
   })
 }
 
 /** Strips `t=`/other player params from a watch URL, keeping only `v=` and `list=`. */
 function cleanWatchUrl(url: string, playlistId: string): Effect.Effect<string, ExtractionError> {
-  const u = new URL(url)
-  const videoId = u.searchParams.get('v')
-  if (!videoId) {
+  const identity = youtubeVideoIdentity(url)
+  if (identity === undefined) {
     return Effect.fail(new ExtractionError({ url, reason: `no video id ("v=") found in mix URL` }))
   }
-  return Effect.succeed(`https://www.youtube.com/watch?v=${videoId}&list=${playlistId}`)
+  return Effect.succeed(`https://www.youtube.com/watch?v=${identity.videoId}&list=${playlistId}`)
 }
 
 function fetchPageHtml(pageUrl: string): Effect.Effect<string, FetchError | HttpStatusError, Http> {
@@ -118,6 +206,14 @@ function fetchPageHtml(pageUrl: string): Effect.Effect<string, FetchError | Http
     const http = yield* Http
     return yield* http.text(pageUrl, { headers: { 'Accept-Language': 'en' } })
   })
+}
+
+function hasPlaylistParameter(url: string): boolean {
+  try {
+    return new URL(url).searchParams.has('list')
+  } catch {
+    return false
+  }
 }
 
 function extractDataOrFail(html: string, pageUrl: string): Effect.Effect<unknown, ExtractionError> {

@@ -6,7 +6,17 @@
 import { Effect, Layer } from 'effect'
 import type { DebugEntry } from '../debug'
 import { DriveAuthError, IpcError } from './errors'
-import { DebugLog, Http, Identity, Kv, Tabs, makeHttp } from './services'
+import {
+  Alarms,
+  DebugLog,
+  Http,
+  type HttpInit,
+  Identity,
+  Kv,
+  Scripting,
+  Tabs,
+  makeHttp,
+} from './services'
 
 export function kvTest(seed: Record<string, unknown> = {}) {
   const store = new Map(Object.entries(seed))
@@ -23,9 +33,17 @@ export function debugLogTest(sink: DebugEntry[] = []) {
   return Layer.succeed(
     DebugLog,
     DebugLog.of({
-      log: (scope, msg, data) =>
+      log: (scope, msg, data, meta) =>
         Effect.sync(() => {
-          sink.push({ t: '', scope, msg, ...(data !== undefined ? { data } : {}) })
+          sink.push({
+            t: '',
+            scope,
+            msg,
+            ...(meta?.level !== undefined && meta.level !== 'info' ? { level: meta.level } : {}),
+            ...(meta?.elapsedMs !== undefined ? { elapsedMs: meta.elapsedMs } : {}),
+            ...(meta?.run !== undefined ? { run: meta.run } : {}),
+            ...(data !== undefined ? { data } : {}),
+          })
         }),
       entries: () => Effect.sync(() => sink),
       clear: () =>
@@ -52,9 +70,61 @@ export function tabsTest(opts: {
   )
 }
 
-export function httpTest(responses: Record<string, string>) {
-  const fakeFetch = (async (url: string) => {
-    const body = responses[url]
+export function scriptingTest(
+  opts: {
+    onExtractPageText?: (tabId: number) => { title: string; text: string }
+  } = {},
+) {
+  return Layer.succeed(
+    Scripting,
+    Scripting.of({
+      extractPageText: (tabId) =>
+        opts.onExtractPageText
+          ? Effect.sync(() => opts.onExtractPageText?.(tabId) ?? { title: '', text: '' })
+          : Effect.fail(new IpcError({ reason: 'scriptingTest: no extraction configured' })),
+    }),
+  )
+}
+
+export function alarmsTest(
+  opts: {
+    onSchedule?: (name: string, when: number) => void
+    onClear?: (name: string) => boolean
+  } = {},
+) {
+  return Layer.succeed(
+    Alarms,
+    Alarms.of({
+      schedule: (name, when) =>
+        Effect.sync(() => {
+          opts.onSchedule?.(name, when)
+        }),
+      clear: (name) => Effect.sync(() => opts.onClear?.(name) ?? true),
+    }),
+  )
+}
+
+export interface RecordedHttpRequest {
+  url: string
+  body?: string
+}
+
+/**
+ * `requests`, if passed, is pushed into (mirrors `debugLogTest`'s sink
+ * pattern) with every call's `{ url, body }` — lets a router test assert on
+ * an outgoing RPC's envelope without router.ts exposing anything new.
+ */
+export function httpTest(
+  responses: Record<string, string | string[]>,
+  requests: RecordedHttpRequest[] = [],
+) {
+  const queued = new Map(
+    Object.entries(responses).map(([url, body]) => [url, Array.isArray(body) ? [...body] : body]),
+  )
+  const fakeFetch = (async (url: string, init?: HttpInit) => {
+    requests.push({ url, ...(init?.body !== undefined ? { body: init.body.toString() } : {}) })
+    const configured = queued.get(url)
+    const body = Array.isArray(configured) ? configured.shift() : configured
     return body !== undefined
       ? new Response(body, { status: 200 })
       : new Response('not found', { status: 404 })

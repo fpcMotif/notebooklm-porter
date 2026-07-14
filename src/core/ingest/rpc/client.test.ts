@@ -1,5 +1,6 @@
 import { assert, describe, it } from '@effect/vitest'
-import { Effect, Layer, Result } from 'effect'
+import { Effect, Fiber, Layer, Result } from 'effect'
+import { TestClock } from 'effect/testing'
 import {
   FetchError,
   HttpStatusError,
@@ -8,7 +9,7 @@ import {
   RpcRefused,
 } from '../../fx/errors'
 import { DebugLog, Http, type HttpInit } from '../../fx/services'
-import { fetchSession, rpcCall } from './client'
+import { addTextSource, createNotebook, fetchSession, rpcCall } from './client'
 import { RPC_IDS } from './protocol'
 
 const NoopDebugLive = Layer.succeed(
@@ -68,6 +69,32 @@ describe('fetchSession', () => {
       }
     }),
   )
+
+  it.effect('turns a stalled session page into a typed fetch failure', () =>
+    Effect.gen(function* () {
+      const layer = Layer.mergeAll(
+        httpLayer(() => Effect.never),
+        NoopDebugLive,
+      )
+      const fiber = yield* Effect.race(
+        fetchSession(0).pipe(
+          Effect.provide(layer),
+          Effect.result,
+          Effect.map((result) => ({ kind: 'result' as const, result })),
+        ),
+        Effect.sleep('21 seconds').pipe(Effect.as({ kind: 'deadline' as const })),
+      ).pipe(Effect.forkChild)
+
+      yield* TestClock.adjust('21 seconds')
+      const outcome = yield* Fiber.join(fiber)
+
+      assert.strictEqual(outcome.kind, 'result')
+      if (outcome.kind === 'result') {
+        assert.isTrue(Result.isFailure(outcome.result))
+        if (Result.isFailure(outcome.result)) assert.instanceOf(outcome.result.failure, FetchError)
+      }
+    }),
+  )
 })
 
 describe('rpcCall', () => {
@@ -91,6 +118,44 @@ describe('rpcCall', () => {
       const result = yield* rpcCall(RPC_IDS.addSource, {}, session, 0).pipe(Effect.provide(layer))
       assert.deepStrictEqual(result, { ok: true })
       assert.strictEqual(calls, 2)
+    }),
+  )
+
+  it.effect('never retries an add-source mutation after an ambiguous 500', () =>
+    Effect.gen(function* () {
+      let calls = 0
+      const layer = Layer.mergeAll(
+        httpLayer(() => {
+          calls += 1
+          return Effect.fail(new HttpStatusError({ url: 'u', status: 500 }))
+        }),
+        NoopDebugLive,
+      )
+      const result = yield* Effect.result(
+        addTextSource('nb-1', 'Title', 'body', session, 0).pipe(Effect.provide(layer)),
+      )
+
+      assert.isTrue(Result.isFailure(result))
+      assert.strictEqual(calls, 1)
+    }),
+  )
+
+  it.live('never retries a create-notebook mutation after an ambiguous 500', () =>
+    Effect.gen(function* () {
+      let calls = 0
+      const layer = Layer.mergeAll(
+        httpLayer(() => {
+          calls += 1
+          return Effect.fail(new HttpStatusError({ url: 'u', status: 500 }))
+        }),
+        NoopDebugLive,
+      )
+      const result = yield* Effect.result(
+        createNotebook('Untitled notebook', session, 0).pipe(Effect.provide(layer)),
+      )
+
+      assert.isTrue(Result.isFailure(result))
+      assert.strictEqual(calls, 1)
     }),
   )
 

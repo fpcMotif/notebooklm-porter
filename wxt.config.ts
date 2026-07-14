@@ -26,8 +26,19 @@ export default defineConfig({
     // export; `unlimitedStorage` because a single long thread can exceed
     // the 10MB storage.local quota once a few captures accumulate;
     // `clipboardWrite` backs the copy-as-markdown fallback ingest path;
-    // `identity` backs the Drive backup OAuth flow (design §2).
-    permissions: ['storage', 'downloads', 'unlimitedStorage', 'clipboardWrite', 'identity'],
+    // `identity` backs the Drive backup OAuth flow (design §2); `alarms`
+    // wakes the MV3 worker to resume durable ingest work.
+    permissions: [
+      'storage',
+      'downloads',
+      'unlimitedStorage',
+      'clipboardWrite',
+      'identity',
+      'alarms',
+      'contextMenus',
+      'activeTab',
+      'scripting',
+    ],
     host_permissions: [...allHostPermissions(), NOTEBOOKLM_HOST, DRIVE_HOST],
   },
 })

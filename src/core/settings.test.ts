@@ -1,7 +1,13 @@
 import { assert, describe, it } from '@effect/vitest'
 import { Effect, Layer } from 'effect'
 import { Kv } from './fx/services'
-import { DEFAULT_SETTINGS, getSettings, updateSettings } from './settings'
+import {
+  DEFAULT_SETTINGS,
+  getSettings,
+  notebookTargetPatch,
+  resolveNotebookTarget,
+  updateSettings,
+} from './settings'
 
 function makeKvLayer(initial: Record<string, unknown> = {}) {
   const store = new Map<string, unknown>(Object.entries(initial))
@@ -39,4 +45,41 @@ describe('settings', () => {
       assert.deepStrictEqual(reread, second)
     }).pipe(Effect.provide(makeKvLayer())),
   )
+
+  it('resolves only notebook IDs present in the freshly listed active account', () => {
+    const targets = { youtube: 'old-account', reddit: 'nb-reddit' }
+    const notebooks = [{ id: 'nb-default' }, { id: 'nb-reddit' }]
+
+    assert.strictEqual(
+      resolveNotebookTarget(notebooks, [{ site: 'youtube' }, { site: 'reddit' }], targets),
+      'nb-default',
+    )
+    assert.strictEqual(
+      resolveNotebookTarget(notebooks, [{ site: 'youtube' }], targets, 'old-account'),
+      'nb-default',
+    )
+    assert.strictEqual(
+      resolveNotebookTarget(notebooks, [{ site: 'youtube' }], targets, 'nb-reddit'),
+      'nb-reddit',
+    )
+    assert.strictEqual(
+      resolveNotebookTarget(notebooks, [{ site: 'reddit' }, { site: 'hackernews' }], {
+        reddit: 'nb-reddit',
+        hackernews: 'nb-reddit',
+      }),
+      'nb-reddit',
+    )
+  })
+
+  it('records successful targets without replacing targets for other sites', () => {
+    assert.deepStrictEqual(
+      notebookTargetPatch({ youtube: 'nb-youtube', x: 'nb-x' }, ['reddit', 'hackernews'], 'nb-a'),
+      {
+        youtube: 'nb-youtube',
+        x: 'nb-x',
+        reddit: 'nb-a',
+        hackernews: 'nb-a',
+      },
+    )
+  })
 })

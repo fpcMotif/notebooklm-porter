@@ -22,10 +22,11 @@ just closing verified gaps the audit found in the mid-migration messaging/router
   unconditionally sent `porter/capture-url` for every adapter, even `xAdapter` (which sets
   `contentScript: true` and has no `captureFromUrl`) — so `router.ts`'s handler fell
   through to `{ ok: false, error: 'Nothing capturable on this page' }` despite `detect()`
-  already having told the popup the page was capturable. Fix: `App.tsx`'s capture action
-  branches on the matched adapter's `contentScript` flag and sends `porter/capture-page`
-  (which `router.ts` already relays via `Tabs.sendMessage(tabId, { type:
-  'porter/extract-thread' })`) instead of `porter/capture-url` for those adapters. Pre-existing
+  already having told the popup the page was capturable. Fix (as landed): the popup keeps
+  sending `porter/capture-url`; `router.ts`'s handler now branches on the matched adapter's
+  `contentScript` flag and delegates to a shared `captureViaContentScript(tabId)` helper —
+  the same `Tabs.sendMessage(tabId, { type: 'porter/extract-thread' })` relay
+  `porter/capture-page` uses — so future contentScript adapters need no popup changes. Pre-existing
   bug, not introduced by the Effect migration — confirmed via `git diff HEAD --
   src/entrypoints/popup/App.tsx` showing the identical unconditional call pre-migration.
 
@@ -34,11 +35,13 @@ just closing verified gaps the audit found in the mid-migration messaging/router
   `messaging.ts`/`router.ts`/`App.tsx` — half of the user's "cannot sync... by creating a
   new one" report was simply a missing message type, not a regression. Fix: add
   `porter/create-notebook` to `PorterMessage`/`PorterResponseMap` (`src/core/messaging.ts`),
-  a `router.ts` handler that calls `createNotebook` and returns `{ id, title }`, and a
-  create-notebook text input + button in `App.tsx` next to the existing notebook `<select>`.
-  `CCqFvf`'s response shape has no live fixture (unlike `wXbhsf`'s), so treat a parse miss
-  as expected, not drift, for now — the notebook-picker design (§2 below) is where the
-  listNotebooks-diff fallback belongs if direct parsing proves unreliable.
+  a `router.ts` handler, and a create-notebook text input + button in `App.tsx` next to the
+  existing notebook `<select>` (auto-selects the created notebook on success).
+  `CCqFvf`'s response shape has no live fixture (unlike `wXbhsf`'s), so the handler (as
+  landed, then hardened) does not trust it: it lists notebooks before and after the create,
+  identifies the created notebook by before/after id-diff (parsed-id fast path when it
+  works), and retries the after-list briefly to absorb read-after-write lag before
+  declaring `ProtocolDrift`.
 
 - [ ] **X thread DOM-walk extraction.** `x.content.ts`'s `porter/extract-thread` handler is
   a hardcoded stub (`{ ok: false, error: 'X extraction not implemented yet' }`) — X-thread
@@ -124,8 +127,10 @@ approach, effort, key risk, dependency notes.
   degradation cooldown, mirrors `ledger.ts`'s split) so later ingest calls skip straight to
   Tier B without re-paying a failed RPC round trip; new pure
   `src/core/ingest/dom/selectors.ts` centralizing all DOM selector logic in one file, per
-  spec's "a Google change is a one-file patch" mandate. `ingestIntoNotebook` tries RPC first,
-  falls through to DOM for that same doc within the same iteration on failure.
+  spec's "a Google change is a one-file patch" mandate. The durable queue owns
+  fallback routing: a read-only list-notebooks canary can degrade to DOM before
+  any source mutation, while a failed add-source request stays explicit
+  uncertainty and never falls through to DOM.
 - **Effort:** L, ~18-24h implementation, plus unbounded live-account QA to correct the
   selector placeholders (impossible to verify in this sandbox).
 - **Key risk:** the DOM selectors are unverified placeholders with no live authenticated

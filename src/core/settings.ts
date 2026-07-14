@@ -2,8 +2,12 @@ import { Effect } from 'effect'
 import { Kv } from './fx/services'
 import type { StorageError } from './fx/errors'
 import type { NblmAccount } from './accounts/parse'
+import type { SiteId } from './model/types'
 
 const KEY = 'porter/settings'
+
+/** The last successful NotebookLM destination for each captured source site. */
+export type NotebookTargets = Partial<Record<SiteId, string>>
 
 /**
  * Cross-cutting extension settings: discovered NotebookLM Google accounts
@@ -12,6 +16,8 @@ const KEY = 'porter/settings'
 export interface PorterSettings {
   nblmAuthuser: number
   accounts: NblmAccount[]
+  /** Remembered destination IDs. The popup validates each against the active account's fresh list. */
+  notebookTargets: NotebookTargets
   /** Google OAuth Client ID (Chrome Extension type) for Drive backup. */
   driveClientId?: string
 }
@@ -19,6 +25,45 @@ export interface PorterSettings {
 export const DEFAULT_SETTINGS: PorterSettings = {
   nblmAuthuser: 0,
   accounts: [],
+  notebookTargets: {},
+}
+
+/**
+ * Keeps a manual choice when it belongs to the freshly listed account;
+ * otherwise uses a remembered destination only when every captured site
+ * agrees on the same valid target, then falls back to the first currently
+ * listed notebook. Stored IDs are never trusted on their own, so a target
+ * from another account cannot leak into an ingest.
+ */
+export function resolveNotebookTarget(
+  notebooks: readonly { id: string }[],
+  docs: readonly { site: SiteId }[],
+  targets: NotebookTargets,
+  currentId = '',
+): string {
+  if (notebooks.some((notebook) => notebook.id === currentId)) return currentId
+
+  const remembered: string[] = []
+  for (const doc of docs) {
+    const target = targets[doc.site]
+    if (target === undefined || !notebooks.some((notebook) => notebook.id === target)) break
+    remembered.push(target)
+  }
+  if (remembered.length === docs.length && new Set(remembered).size === 1)
+    return remembered[0] ?? ''
+
+  return notebooks[0]?.id ?? ''
+}
+
+/** Returns a patch that records one notebook as the successful destination for each site. */
+export function notebookTargetPatch(
+  current: NotebookTargets,
+  sites: readonly SiteId[],
+  notebookId: string,
+): NotebookTargets {
+  const next = { ...current }
+  for (const site of sites) next[site] = notebookId
+  return next
 }
 
 export function getSettings(): Effect.Effect<PorterSettings, StorageError, Kv> {
