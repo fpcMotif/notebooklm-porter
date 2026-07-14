@@ -1,5 +1,5 @@
-import type { Capture } from '../../model/types'
 import type { Capturable, SourceAdapter } from '../types'
+import { captureHnThread } from './capture'
 
 export const hackernewsAdapter: SourceAdapter = {
   id: 'hackernews',
@@ -13,10 +13,7 @@ export const hackernewsAdapter: SourceAdapter = {
     }
     return null
   },
-  async captureFromUrl(url: string): Promise<Capture> {
-    const { captureHnThread } = await import('./capture')
-    return captureHnThread(url)
-  },
+  captureFromUrl: captureHnThread,
 }
 
 function safeUrl(url: string): URL | null {

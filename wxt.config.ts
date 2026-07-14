@@ -9,6 +9,9 @@ import { allHostPermissions } from './src/core/adapters/registry'
  */
 const NOTEBOOKLM_HOST = 'https://notebooklm.google.com/*'
 
+/** Drive backup (design §2) uploads via the SW — a host permission is what makes that fetch CORS-exempt. */
+const DRIVE_HOST = 'https://www.googleapis.com/*'
+
 // https://wxt.dev/api/config.html
 export default defineConfig({
   srcDir: 'src',
@@ -22,8 +25,20 @@ export default defineConfig({
     // `storage` holds the capture queue; `downloads` powers Markdown/JSONL
     // export; `unlimitedStorage` because a single long thread can exceed
     // the 10MB storage.local quota once a few captures accumulate;
-    // `clipboardWrite` backs the copy-as-markdown fallback ingest path.
-    permissions: ['storage', 'downloads', 'unlimitedStorage', 'clipboardWrite'],
-    host_permissions: [...allHostPermissions(), NOTEBOOKLM_HOST],
+    // `clipboardWrite` backs the copy-as-markdown fallback ingest path;
+    // `identity` backs the Drive backup OAuth flow (design §2); `alarms`
+    // wakes the MV3 worker to resume durable ingest work.
+    permissions: [
+      'storage',
+      'downloads',
+      'unlimitedStorage',
+      'clipboardWrite',
+      'identity',
+      'alarms',
+      'contextMenus',
+      'activeTab',
+      'scripting',
+    ],
+    host_permissions: [...allHostPermissions(), NOTEBOOKLM_HOST, DRIVE_HOST],
   },
 })

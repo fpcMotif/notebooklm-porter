@@ -1,13 +1,18 @@
 /**
  * Sync ledger (design §9): per-notebook record of which external items are
- * already synced, keyed by `SourceDoc.id` ("<site>:<nativeId>"). Enables
- * idempotent re-import (skip what's already there), staleness diffing
- * (detect a thread whose content changed since last sync), and cross-import
- * dedup (a video reachable via two different captures syncs once).
+ * already synced, keyed by a stable ingest-unit id (for example a thread's
+ * `<site>:<nativeId>`, a playlist's `<site>:<playlistId>:toc`, or a shared
+ * `youtube:<videoId>`). Enables idempotent re-import (skip what's already
+ * there), staleness diffing (detect a thread whose content changed since last
+ * sync), and cross-import dedup (a video reachable via two captures syncs
+ * once).
  *
  * Reducers below are pure — no storage access — so the classification and
  * update logic is fully unit-testable without mocking `browser.storage`.
  */
+import { Effect } from 'effect'
+import { Kv } from '../fx/services'
+import type { StorageError } from '../fx/errors'
 
 export interface LedgerEntry {
   contentHash: string
@@ -28,6 +33,24 @@ export interface DiffResult {
   changed: string[]
   /** Present with a matching contentHash — already synced, skip. */
   unchanged: string[]
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isLedgerEntry(value: unknown): value is LedgerEntry {
+  return (
+    isRecord(value) && typeof value.contentHash === 'string' && typeof value.lastSynced === 'string'
+  )
+}
+
+function isNotebookLedger(value: unknown): value is Record<string, LedgerEntry> {
+  return isRecord(value) && Object.values(value).every(isLedgerEntry)
+}
+
+export function isLedger(value: unknown): value is Ledger {
+  return isRecord(value) && Object.values(value).every(isNotebookLedger)
 }
 
 /**
@@ -99,12 +122,18 @@ export function contentHash(markdown: string): string {
 
 const STORAGE_KEY = 'porter/ledger'
 
-/** Thin storage.local wrapper — logic lives in the pure reducers above. */
-export async function loadLedger(): Promise<Ledger> {
-  const got = await browser.storage.local.get(STORAGE_KEY)
-  return (got[STORAGE_KEY] ?? {}) as Ledger
+/** Thin `Kv` wrapper — logic lives in the pure reducers above. */
+export function loadLedger(): Effect.Effect<Ledger, StorageError, Kv> {
+  return Effect.gen(function* () {
+    const kv = yield* Kv
+    const stored = yield* kv.get<unknown>(STORAGE_KEY)
+    return isLedger(stored) ? stored : {}
+  })
 }
 
-export async function saveLedger(ledger: Ledger): Promise<void> {
-  await browser.storage.local.set({ [STORAGE_KEY]: ledger })
+export function saveLedger(ledger: Ledger): Effect.Effect<void, StorageError, Kv> {
+  return Effect.gen(function* () {
+    const kv = yield* Kv
+    yield* kv.set(STORAGE_KEY, ledger)
+  })
 }

@@ -6,7 +6,7 @@
  * in the pipeline knows site-specific structure.
  */
 
-export type SiteId = 'youtube' | 'x' | 'reddit' | 'hackernews'
+export type SiteId = 'youtube' | 'x' | 'reddit' | 'hackernews' | 'web'
 
 export interface Author {
   /** Display name as shown on the site ("Paul Graham"). */
@@ -83,6 +83,30 @@ export interface VideoEntry {
   hasCaptions?: boolean
 }
 
+/** A standalone YouTube watch source, distinct from a playlist row. */
+export interface Video {
+  videoId: string
+  /** Canonical watch URL with no playlist or player parameters. */
+  url: string
+  title: string
+  channel?: string
+  durationSeconds?: number
+}
+
+/**
+ * An immutable, capture-time transcript snapshot for one playlist video.
+ *
+ * The playlist remains the authoritative list of videos. This only records
+ * enrichment that completed successfully, so callers can keep using the
+ * canonical YouTube URL for every video without a transcript.
+ */
+export interface TranscriptDocument {
+  videoId: string
+  url: string
+  title: string
+  markdown: string
+}
+
 export interface Playlist {
   playlistId: string
   url: string
@@ -90,12 +114,28 @@ export interface Playlist {
   channel?: string
   videoCount: number
   videos: VideoEntry[]
+  /** Successfully captured, opt-in transcript snapshots keyed by video id. */
+  transcriptDocs?: TranscriptDocument[]
   /** True when continuation fetching stopped before the full list was resolved. */
   truncated?: boolean
 }
 
+/** A generic page, selection, or link captured from the browser context menu. */
+export interface WebCapture {
+  /** Stable within its capture mode; lets repeated page/link captures replace stale snapshots. */
+  id: string
+  url: string
+  title: string
+  mode: 'selection' | 'page' | 'link'
+  text: string
+}
+
 /** What an adapter produced from one capture action. */
-export type Capture = { kind: 'thread'; thread: Thread } | { kind: 'playlist'; playlist: Playlist }
+export type Capture =
+  | { kind: 'thread'; thread: Thread }
+  | { kind: 'playlist'; playlist: Playlist }
+  | { kind: 'video'; video: Video }
+  | { kind: 'web'; web: WebCapture }
 
 /**
  * A NotebookLM-ready document: the unit that gets ingested (pasted text /
@@ -106,13 +146,15 @@ export interface SourceDoc {
   /** Stable id: `${site}:${nativeId}` — used for dedup across re-captures. */
   id: string
   site: SiteId
-  kind: 'thread' | 'playlist'
+  kind: 'thread' | 'playlist' | 'video' | 'web'
   title: string
   canonicalUrl: string
   capturedAt: string
   markdown: string
   /** JSONL rendering (one JSON object per post/video per line); produced on demand for power users. */
   jsonl?: string
+  /** Successful playlist transcript snapshots. Missing videos use URL import. */
+  videoDocs?: TranscriptDocument[]
   wordCount: number
   truncated: boolean
 }

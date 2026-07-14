@@ -39,7 +39,10 @@ Research across the reference repos and the awesome-notebooklm ecosystem (see
 
 - No podcast/RSS/doc-site import (jetpack's turf; not our wedge).
 - No NotebookLM *clone* features (no BYOK chat, no local LLM) — we feed the real product.
-- No account/cloud sync backend in v1. All state is local (`storage.local`).
+- No account/cloud sync *backend* in v1. All state is local (`storage.local`). In scope
+  (v1.5, user-requested): explicit-action **Google Drive backup** of captured sources
+  (OAuth `drive.file`, upload/update into one folder — Drive revisions give version
+  history) and **multi-account NotebookLM** via `?authuser=` on the RPC endpoint.
 - No audio/video *overview* generation — that's NotebookLM's job downstream.
 - No Enterprise API path in v1 (it exists — Discovery Engine `notebooks.sources.batchCreate` —
   but is gated to Google Cloud orgs; consumer users can't use it).
@@ -121,7 +124,11 @@ in the UI:
 - Distinguish **not-logged-in** (no CSRF token / 401) from **protocol-drift**
   (200 but unparseable envelope) from **quota** (source-cap error) — surface each
   distinctly to the user. jetpack collapses all of these to "empty array"; we must not.
-- On any Tier-A failure, **auto-fall-back to Tier B**, and tell the user which tier ran.
+- Use a read-only `listNotebooks` canary to detect protocol drift before a
+  source mutation, then auto-fall-back to Tier B. Once an add-source RPC has
+  started, never auto-fall-back from its failure: the source may have been
+  created before a network or parsing failure, so it must remain explicit
+  uncertainty instead of risking a duplicate.
 
 ### Tier B — DOM automation on an open NBLM tab (fallback)
 

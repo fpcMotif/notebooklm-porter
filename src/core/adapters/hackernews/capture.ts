@@ -1,14 +1,19 @@
+import { Effect } from 'effect'
 import type { Capture } from '../../model/types'
+import { ExtractionError, type FetchError, type HttpStatusError } from '../../fx/errors'
+import { Http } from '../../fx/services'
 import { parseHnItem } from './parse'
 
 const ALGOLIA_ITEM_URL = 'https://hn.algolia.com/api/v1/items/'
 
 /** Extracts the numeric item id from a `/item?id=<id>` URL. */
-function extractItemId(url: string): string {
+function extractItemId(url: string): Effect.Effect<string, ExtractionError> {
   const u = new URL(url)
   const id = u.searchParams.get('id')
-  if (!id) throw new Error(`not an HN item URL: ${url}`)
-  return id
+  if (!id) {
+    return Effect.fail(new ExtractionError({ url, reason: 'not an HN item URL' }))
+  }
+  return Effect.succeed(id)
 }
 
 /**
@@ -17,17 +22,20 @@ function extractItemId(url: string): string {
  * nested comment tree in one request. Runs in the service worker; parsing
  * itself is pure and lives in `parse.ts`.
  */
-export async function captureHnThread(url: string): Promise<Capture> {
-  const id = extractItemId(url)
-  const canonicalUrl = `https://news.ycombinator.com/item?id=${id}`
+export function captureHnThread(
+  url: string,
+): Effect.Effect<Capture, FetchError | HttpStatusError | ExtractionError, Http> {
+  return Effect.gen(function* () {
+    const http = yield* Http
+    const id = yield* extractItemId(url)
+    const canonicalUrl = `https://news.ycombinator.com/item?id=${id}`
 
-  const response = await fetch(`${ALGOLIA_ITEM_URL}${id}`)
-  if (!response.ok) {
-    throw new Error(`HN Algolia fetch failed: ${response.status} ${response.statusText}`)
-  }
+    const json = yield* http.json(`${ALGOLIA_ITEM_URL}${id}`)
+    const thread = yield* Effect.try({
+      try: () => parseHnItem(json, canonicalUrl),
+      catch: (cause) => new ExtractionError({ url, reason: String(cause) }),
+    })
 
-  const json: unknown = JSON.parse(await response.text())
-  const thread = parseHnItem(json, canonicalUrl)
-
-  return { kind: 'thread', thread }
+    return { kind: 'thread', thread }
+  })
 }

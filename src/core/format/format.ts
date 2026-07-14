@@ -2,6 +2,8 @@ import type { Capture, SourceDoc } from '../model/types'
 import { playlistToJsonl, threadToJsonl } from './jsonl'
 import { playlistToMarkdown, threadToMarkdown } from './markdown'
 import type { FormatOptions } from './types'
+import { videoToMarkdown } from './video'
+import { webToMarkdown } from './web'
 
 /**
  * Extracts the root post id from a thread permalink so SourceDoc.id can be
@@ -74,6 +76,38 @@ export function formatCapture(
     }
   }
 
+  if (capture.kind === 'web') {
+    const { web } = capture
+    const markdown = webToMarkdown(web, capturedAt)
+    return {
+      id: `web:${web.id}`,
+      site: 'web',
+      kind: 'web',
+      title: web.title,
+      canonicalUrl: web.url,
+      capturedAt,
+      markdown,
+      wordCount: countBodyWords(markdown),
+      truncated: false,
+    }
+  }
+
+  if (capture.kind === 'video') {
+    const { video } = capture
+    const markdown = videoToMarkdown(video, capturedAt)
+    return {
+      id: `youtube:${video.videoId}`,
+      site: 'youtube',
+      kind: 'video',
+      title: video.title,
+      canonicalUrl: video.url,
+      capturedAt,
+      markdown,
+      wordCount: countBodyWords(markdown),
+      truncated: false,
+    }
+  }
+
   const { playlist } = capture
   const markdown = playlistToMarkdown(playlist, capturedAt)
   // TODO(ingest): 500k-word/source chunking hooks in here — split this
@@ -89,6 +123,9 @@ export function formatCapture(
     capturedAt,
     markdown,
     jsonl: playlistToJsonl(playlist),
+    ...(playlist.transcriptDocs !== undefined && playlist.transcriptDocs.length > 0
+      ? { videoDocs: playlist.transcriptDocs }
+      : {}),
     wordCount: countBodyWords(markdown),
     truncated: playlist.truncated ?? false,
   }

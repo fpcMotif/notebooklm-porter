@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { Capture, Playlist, Post, Thread } from '../model/types'
+import type { Capture, Playlist, Post, Thread, Video } from '../model/types'
 import { formatCapture } from './format'
 
 const FIXED_NOW = () => '2026-07-06T12:00:00.000Z'
@@ -44,6 +44,18 @@ function playlistCapture(playlist: Partial<Playlist> = {}): Capture {
         },
       ],
       ...playlist,
+    },
+  }
+}
+
+function videoCapture(video: Partial<Video> = {}): Capture {
+  return {
+    kind: 'video',
+    video: {
+      videoId: 'abcdefghijk',
+      url: 'https://www.youtube.com/watch?v=abcdefghijk',
+      title: 'One video',
+      ...video,
     },
   }
 }
@@ -205,11 +217,69 @@ describe('formatCapture — playlist', () => {
     expect(doc.markdown).toContain('| 1 | Video one |')
   })
 
+  it('retains successful transcript snapshots separately from the playlist overview', () => {
+    const transcriptDocs = [
+      {
+        videoId: 'v1',
+        url: 'https://www.youtube.com/watch?v=v1',
+        title: 'Video one',
+        markdown: '# Video one\n\nTranscript',
+      },
+    ]
+    const doc = formatCapture(playlistCapture({ transcriptDocs }), undefined, FIXED_NOW)
+
+    expect(doc.videoDocs).toEqual(transcriptDocs)
+    expect(doc.markdown).toContain('| 1 | Video one |')
+  })
+
   it('wordCount excludes frontmatter for playlists too', () => {
     const doc = formatCapture(playlistCapture(), undefined, FIXED_NOW)
     expect(doc.markdown.startsWith('---\n')).toBe(true)
     // wordCount should be small (H1 + table), not inflated by frontmatter keys
     expect(doc.wordCount).toBeLessThan(30)
+  })
+})
+
+describe('formatCapture — standalone video', () => {
+  it('stores one canonical YouTube source without a playlist overview', () => {
+    const doc = formatCapture(videoCapture(), undefined, FIXED_NOW)
+
+    expect(doc).toMatchObject({
+      id: 'youtube:abcdefghijk',
+      site: 'youtube',
+      kind: 'video',
+      canonicalUrl: 'https://www.youtube.com/watch?v=abcdefghijk',
+      truncated: false,
+    })
+    expect(doc.markdown).toContain('NotebookLM imports this canonical YouTube source')
+  })
+})
+
+describe('formatCapture — web', () => {
+  it('keeps a context-menu capture as a standalone, stable text document', () => {
+    const doc = formatCapture(
+      {
+        kind: 'web',
+        web: {
+          id: 'selection:abc12345',
+          url: 'https://example.com/article',
+          title: 'An article',
+          mode: 'selection',
+          text: 'Useful excerpt',
+        },
+      },
+      undefined,
+      FIXED_NOW,
+    )
+
+    expect(doc).toMatchObject({
+      id: 'web:selection:abc12345',
+      site: 'web',
+      kind: 'web',
+      canonicalUrl: 'https://example.com/article',
+      truncated: false,
+    })
+    expect(doc.markdown).toContain('Useful excerpt')
   })
 })
 

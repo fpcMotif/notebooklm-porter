@@ -1,10 +1,16 @@
+import type { Effect } from 'effect'
+import type { PorterError } from '../fx/errors'
+import type { DebugLog, Http } from '../fx/services'
 import type { Capture, SiteId } from '../model/types'
 
 /**
  * What a URL offers for capture, decided synchronously from the URL alone
  * so the popup can label its button without touching the page.
  */
-export type Capturable = { kind: 'thread'; label: string } | { kind: 'playlist'; label: string }
+export type Capturable =
+  | { kind: 'thread'; label: string }
+  | { kind: 'playlist'; label: string }
+  | { kind: 'video'; label: string }
 
 /**
  * One platform's capture strategy. Two capture paths exist and an adapter
@@ -31,7 +37,7 @@ export interface SourceAdapter {
   /** What this URL offers, or null when the page has nothing capturable. */
   detect(url: string): Capturable | null
   /** Background-side capture from the URL alone. Mutually exclusive with `contentScript`. */
-  captureFromUrl?(url: string): Promise<Capture>
+  captureFromUrl?(url: string): Effect.Effect<Capture, PorterError, Http | DebugLog>
   /** True when a content script owns extraction for this site. */
   contentScript?: boolean
 }

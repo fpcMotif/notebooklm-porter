@@ -1,9 +1,15 @@
-import type { Capture } from '../../model/types'
 import type { Capturable, SourceAdapter } from '../types'
+import { captureYoutube, isMixList } from './capture'
+import { standaloneYoutubeVideo, youtubeVideoIdentity } from './video'
 
 export const youtubeAdapter: SourceAdapter = {
   id: 'youtube',
-  hostMatch: ['https://www.youtube.com/*', 'https://youtube.com/*', 'https://m.youtube.com/*'],
+  hostMatch: [
+    'https://www.youtube.com/*',
+    'https://youtube.com/*',
+    'https://m.youtube.com/*',
+    'https://youtu.be/*',
+  ],
   detect(url: string): Capturable | null {
     const u = safeUrl(url)
     if (!u) return null
@@ -11,16 +17,18 @@ export const youtubeAdapter: SourceAdapter = {
     if (u.pathname === '/playlist' && listId) {
       return { kind: 'playlist', label: 'Capture this playlist' }
     }
-    if (u.pathname === '/watch' && listId) {
-      return { kind: 'playlist', label: "Capture this video's playlist" }
+    if (listId && youtubeVideoIdentity(url) !== undefined) {
+      const label = isMixList(listId)
+        ? 'Capture this Mix (snapshot)'
+        : "Capture this video's playlist"
+      return { kind: 'playlist', label }
+    }
+    if (standaloneYoutubeVideo(url) !== undefined) {
+      return { kind: 'video', label: 'Capture this video' }
     }
     return null
   },
-  async captureFromUrl(url: string): Promise<Capture> {
-    // Implemented in ./capture.ts (playlist page fetch + InnerTube continuations).
-    const { capturePlaylist } = await import('./capture')
-    return capturePlaylist(url)
-  },
+  captureFromUrl: captureYoutube,
 }
 
 function safeUrl(url: string): URL | null {
