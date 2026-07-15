@@ -19,6 +19,7 @@ describe('youtubeAdapter.detect', () => {
       {
         kind: 'playlist',
         label: "Capture this video's playlist",
+        canEnrichTranscripts: true,
       },
     )
   })
@@ -27,10 +28,12 @@ describe('youtubeAdapter.detect', () => {
     expect(youtubeAdapter.detect('https://youtu.be/abcdefghijk?list=PL123')).toEqual({
       kind: 'playlist',
       label: "Capture this video's playlist",
+      canEnrichTranscripts: true,
     })
     expect(youtubeAdapter.detect('https://youtu.be/abcdefghijk?list=RDabcdefghijk')).toEqual({
       kind: 'playlist',
       label: 'Capture this Mix (snapshot)',
+      canEnrichTranscripts: true,
     })
   })
 })

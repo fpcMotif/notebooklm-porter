@@ -17,7 +17,7 @@ export const redditAdapter: SourceAdapter = {
     }
     return null
   },
-  captureFromUrl: captureRedditThread,
+  strategy: { mode: 'url', capture: captureRedditThread },
 }
 
 function safeUrl(url: string): URL | null {

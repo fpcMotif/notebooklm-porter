@@ -8,6 +8,7 @@ import type { SourceDoc } from '../../core/model/types'
 import { PorterClient, type NotebookMeta } from '../../core/messaging'
 import type { QueueSnapshot } from '../../core/queue/queue'
 import { DEFAULT_SETTINGS, resolveNotebookTarget, type PorterSettings } from '../../core/settings'
+import { canWatchSource } from '../../core/watch/eligibility'
 import type { WatchView } from '../../core/watch/watch'
 import { useAction } from './useAction'
 
@@ -45,8 +46,8 @@ async function clearDebugLog() {
 export function App() {
   const [docs, setDocs] = useState<SourceDoc[]>([])
   const [capturable, setCapturable] = useState<string | undefined>()
-  const [canEnrichYoutube, setCanEnrichYoutube] = useState(false)
-  const [enrichYoutube, setEnrichYoutube] = useState(false)
+  const [canEnrichTranscripts, setCanEnrichTranscripts] = useState(false)
+  const [enrichTranscripts, setEnrichTranscripts] = useState(false)
   const [settings, setSettings] = useState<PorterSettings>(DEFAULT_SETTINGS)
   const [backupResult, setBackupResult] = useState<{ text: string; isError: boolean } | undefined>()
   const [notebooks, setNotebooks] = useState<NotebookMeta[]>([])
@@ -166,8 +167,8 @@ export function App() {
       const detected = yield* Effect.result(client.request({ type: 'porter/detect', url: tab.url }))
       if (Result.isSuccess(detected)) {
         setCapturable(detected.success.capturable)
-        setCanEnrichYoutube(detected.success.canEnrichYoutube === true)
-        if (!detected.success.canEnrichYoutube) setEnrichYoutube(false)
+        setCanEnrichTranscripts(detected.success.canEnrichTranscripts === true)
+        if (!detected.success.canEnrichTranscripts) setEnrichTranscripts(false)
       }
     }
     const listed = yield* Effect.result(client.request({ type: 'porter/list-docs' }))
@@ -226,7 +227,7 @@ export function App() {
           type: 'porter/capture-url',
           url: tab.url,
           tabId: tab.id,
-          ...(enrichYoutube ? { enrichYoutube: true as const } : {}),
+          ...(enrichTranscripts ? { options: { enrichTranscripts: true as const } } : {}),
         }),
       )
       yield* refreshEffect
@@ -563,13 +564,13 @@ export function App() {
       </div>
       {capturable ? (
         <div class="mb-3">
-          {canEnrichYoutube && (
+          {canEnrichTranscripts && (
             <label class="mb-2 flex cursor-pointer items-start gap-2 text-sm text-gray-700">
               <input
                 type="checkbox"
-                checked={enrichYoutube}
+                checked={enrichTranscripts}
                 disabled={captureAction.busy}
-                onChange={(event) => setEnrichYoutube(event.currentTarget.checked)}
+                onChange={(event) => setEnrichTranscripts(event.currentTarget.checked)}
               />
               <span>
                 Capture available transcripts (up to 200 videos). Videos without a transcript use
@@ -593,9 +594,7 @@ export function App() {
       <ul class="space-y-2">
         {docs.map((doc) => {
           const docWatches = watches.filter((watch) => watch.sourceDocId === doc.id)
-          const canWatch =
-            (doc.site === 'youtube' && doc.kind === 'playlist') ||
-            ((doc.site === 'reddit' || doc.site === 'hackernews') && doc.kind === 'thread')
+          const canWatch = canWatchSource(doc)
           const watchForSelectedNotebook = docWatches.find(
             (watch) => watch.notebookId === selectedNotebookId,
           )

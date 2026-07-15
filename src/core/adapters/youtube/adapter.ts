@@ -15,20 +15,20 @@ export const youtubeAdapter: SourceAdapter = {
     if (!u) return null
     const listId = u.searchParams.get('list')
     if (u.pathname === '/playlist' && listId) {
-      return { kind: 'playlist', label: 'Capture this playlist' }
+      return { kind: 'playlist', label: 'Capture this playlist', canEnrichTranscripts: true }
     }
     if (listId && youtubeVideoIdentity(url) !== undefined) {
       const label = isMixList(listId)
         ? 'Capture this Mix (snapshot)'
         : "Capture this video's playlist"
-      return { kind: 'playlist', label }
+      return { kind: 'playlist', label, canEnrichTranscripts: true }
     }
     if (standaloneYoutubeVideo(url) !== undefined) {
       return { kind: 'video', label: 'Capture this video' }
     }
     return null
   },
-  captureFromUrl: captureYoutube,
+  strategy: { mode: 'url', capture: (url, options) => captureYoutube(url, options ?? {}) },
 }
 
 function safeUrl(url: string): URL | null {

@@ -90,10 +90,9 @@ function adapterLinkCapture(
   linkUrl: string,
 ): Effect.Effect<SourceDoc | undefined, PorterError, Http | DebugLog | Kv> {
   const adapter = adapterForUrl(linkUrl)
-  const captureFromUrl = adapter?.contentScript ? undefined : adapter?.captureFromUrl
-  if (captureFromUrl === undefined || adapter?.detect(linkUrl) === null)
+  if (adapter === undefined || adapter.strategy.mode !== 'url' || adapter.detect(linkUrl) === null)
     return Effect.succeed(undefined)
-  return captureFromUrl(linkUrl).pipe(Effect.flatMap(storeCapture))
+  return adapter.strategy.capture(linkUrl).pipe(Effect.flatMap(storeCapture))
 }
 
 /**

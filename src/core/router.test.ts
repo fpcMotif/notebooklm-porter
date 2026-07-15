@@ -97,7 +97,7 @@ describe('handlePorterMessage', () => {
         assert.deepStrictEqual(reply, {
           ok: true,
           capturable: 'Capture this playlist',
-          canEnrichYoutube: true,
+          canEnrichTranscripts: true,
         })
       }),
     )
@@ -271,7 +271,7 @@ describe('handlePorterMessage', () => {
     )
   })
 
-  describe('porter/capture-url (contentScript adapter)', () => {
+  describe('porter/capture-url (content-script adapter)', () => {
     it.effect('relays extract-thread to the tab for an X status URL and stores the doc', () =>
       Effect.gen(function* () {
         const capture = {

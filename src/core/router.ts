@@ -6,11 +6,11 @@
  */
 import { Effect } from 'effect'
 import { discoverAccounts } from './accounts/discover'
+import { captureSource, captureViaContentScript } from './adapters/capture'
 import { adapterForUrl } from './adapters/registry'
-import { capturePlaylist } from './adapters/youtube/capture'
 import { backupDocsToDrive } from './backup/client'
 import { IpcError, NotLoggedIn, ProtocolDrift, type PorterError } from './fx/errors'
-import { Alarms, DebugLog, type Http, type Identity, type Kv, Tabs } from './fx/services'
+import { Alarms, DebugLog, type Http, type Identity, type Kv, type Tabs } from './fx/services'
 import { formatCapture } from './format/format'
 import { exportDocs } from './ingest/export'
 import {
@@ -26,14 +26,8 @@ import { RPC_IDS } from './ingest/rpc/protocol'
 import { scanSources } from './ingest/sources/console'
 import { duplicateRemovalIds, findDuplicateGroups } from './ingest/sources/dedup'
 import { planIngestUnits } from './ingest/units'
-import {
-  isExtractResponse,
-  type ContentRequest,
-  type NotebookMeta,
-  type PorterMessage,
-  type PorterReply,
-} from './messaging'
-import type { SourceDoc } from './model/types'
+import { type NotebookMeta, type PorterMessage, type PorterReply } from './messaging'
+import type { Capture, SourceDoc } from './model/types'
 import { getSettings, notebookTargetPatch, updateSettings, type PorterSettings } from './settings'
 import { QUEUE_ALARM, enqueueUnits, queueSnapshot, retryJob, type QueueTarget } from './queue/queue'
 import { loadQueue, saveQueue } from './queue/store'
@@ -45,6 +39,7 @@ import {
   readCachedNotebooks,
   saveNotebookCache,
 } from './store/notebooks-cache'
+import { canWatchSource } from './watch/eligibility'
 import { armNextWatch } from './watch/resync'
 import { loadWatches, saveWatches } from './watch/store'
 import { removeWatch, removeWatchesForSourceDoc, upsertWatch, watchSnapshot } from './watch/watch'
@@ -77,24 +72,10 @@ function storeCapturedDoc(doc: SourceDoc) {
   })
 }
 
-/**
- * Shared by 'porter/capture-page' and 'porter/capture-url' (for
- * `contentScript: true` adapters, e.g. X): relay an extract request to the
- * tab's content script, then format + store whatever it reports.
- */
-function captureViaContentScript(tabId: number) {
+/** Formats and persists a fresh capture, then replies with the stored doc. */
+function storeAndReply(capture: Capture) {
   return Effect.gen(function* () {
-    const tabs = yield* Tabs
-    const response = yield* tabs.sendMessage(tabId, {
-      type: 'porter/extract-thread',
-    } satisfies ContentRequest)
-    if (!isExtractResponse(response)) {
-      return { ok: false as const, error: 'Malformed content-script response' }
-    }
-    if (!response.ok) {
-      return { ok: false as const, error: response.error }
-    }
-    const doc = formatCapture(response.capture)
+    const doc = formatCapture(capture)
     yield* storeCapturedDoc(doc)
     return { ok: true as const, docs: [doc] }
   })
@@ -224,43 +205,26 @@ function authenticatedNblm(): Effect.Effect<
 
 const handlers: Handlers = {
   'porter/detect': (msg) => {
-    const adapter = adapterForUrl(msg.url)
-    const capturable = adapter?.detect(msg.url)
+    const capturable = adapterForUrl(msg.url)?.detect(msg.url)
     return Effect.succeed({
       ok: true as const,
       ...(capturable ? { capturable: capturable.label } : {}),
-      ...(adapter?.id === 'youtube' && capturable?.kind === 'playlist'
-        ? { canEnrichYoutube: true as const }
-        : {}),
+      ...(capturable?.canEnrichTranscripts === true ? { canEnrichTranscripts: true as const } : {}),
     })
   },
   'porter/capture-url': (msg) => {
     const adapter = adapterForUrl(msg.url)
-    if (adapter?.contentScript) {
-      return captureViaContentScript(msg.tabId)
-    }
-    const captureFromUrl = adapter?.captureFromUrl
-    if (!captureFromUrl) {
+    if (adapter === undefined) {
       return Effect.succeed({ ok: false as const, error: 'Nothing capturable on this page' })
     }
-    return Effect.gen(function* () {
-      const capture = yield* msg.enrichYoutube === true &&
-      adapter.id === 'youtube' &&
-      adapter.detect(msg.url)?.kind === 'playlist'
-        ? capturePlaylist(msg.url, { enrichTranscripts: true })
-        : captureFromUrl(msg.url)
-      const doc = formatCapture(capture)
-      yield* storeCapturedDoc(doc)
-      return { ok: true as const, docs: [doc] }
-    })
+    return captureSource(adapter, msg.url, {
+      tabId: msg.tabId,
+      ...(msg.options !== undefined ? { options: msg.options } : {}),
+    }).pipe(Effect.flatMap(storeAndReply))
   },
-  'porter/capture-page': (msg) => captureViaContentScript(msg.tabId),
-  'porter/capture-result': (msg) =>
-    Effect.gen(function* () {
-      const doc = formatCapture(msg.capture)
-      yield* storeCapturedDoc(doc)
-      return { ok: true as const, docs: [doc] }
-    }),
+  'porter/capture-page': (msg) =>
+    captureViaContentScript(msg.tabId).pipe(Effect.flatMap(storeAndReply)),
+  'porter/capture-result': (msg) => storeAndReply(msg.capture),
   'porter/list-docs': () =>
     Effect.gen(function* () {
       const docs = yield* listDocs()
@@ -344,17 +308,7 @@ const handlers: Handlers = {
       if (doc === undefined) {
         return yield* Effect.fail(new IpcError({ reason: 'The captured source no longer exists' }))
       }
-      const adapter = adapterForUrl(doc.canonicalUrl)
-      const supportedWatch =
-        (doc.site === 'youtube' && doc.kind === 'playlist' && adapter?.id === 'youtube') ||
-        (doc.site === 'reddit' && doc.kind === 'thread' && adapter?.id === 'reddit') ||
-        (doc.site === 'hackernews' && doc.kind === 'thread' && adapter?.id === 'hackernews')
-      if (
-        !supportedWatch ||
-        adapter.contentScript ||
-        adapter.captureFromUrl === undefined ||
-        adapter.detect(doc.canonicalUrl) === null
-      ) {
+      if (!canWatchSource(doc)) {
         return yield* Effect.fail(
           new IpcError({ reason: 'This source cannot be resynced in the background yet' }),
         )
@@ -366,7 +320,7 @@ const handlers: Handlers = {
         sourceUrl: doc.canonicalUrl,
         target,
         ...(doc.videoDocs !== undefined && doc.videoDocs.length > 0
-          ? { enrichYoutube: true as const }
+          ? { captureOptions: { enrichTranscripts: true as const } }
           : {}),
         now: new Date().toISOString(),
       })

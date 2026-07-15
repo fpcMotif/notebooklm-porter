@@ -1,6 +1,5 @@
 import { Effect, Result } from 'effect'
 import { adapterForUrl } from '../adapters/registry'
-import { capturePlaylist } from '../adapters/youtube/capture'
 import type { AlarmError, StorageError } from '../fx/errors'
 import { Alarms, DebugLog, Http, Kv } from '../fx/services'
 import { formatCapture } from '../format/format'
@@ -61,15 +60,18 @@ export function resyncOneDueWatch(
       'resync tick',
       {
         sourceDocId: watch.sourceDocId,
-        enrich: watch.enrichYoutube === true,
+        enrich: watch.captureOptions?.enrichTranscripts === true,
         totalWatches: watches.watches.length,
       },
       { run },
     )
 
     const adapter = adapterForUrl(watch.sourceUrl)
-    const captureFromUrl = adapter?.contentScript ? undefined : adapter?.captureFromUrl
-    if (captureFromUrl === undefined || adapter?.detect(watch.sourceUrl) === null) {
+    if (
+      adapter === undefined ||
+      adapter.strategy.mode !== 'url' ||
+      adapter.detect(watch.sourceUrl) === null
+    ) {
       const disabled = disableWatch(
         watches,
         watch.id,
@@ -88,16 +90,14 @@ export function resyncOneDueWatch(
     }
 
     const captured = yield* Effect.result(
-      watch.enrichYoutube === true && adapter?.id === 'youtube'
-        ? capturePlaylist(watch.sourceUrl, { enrichTranscripts: true })
-        : captureFromUrl(watch.sourceUrl),
+      adapter.strategy.capture(watch.sourceUrl, watch.captureOptions),
     )
     if (Result.isFailure(captured)) {
       const failed = rescheduleWatchFailure(watches, watch.id, 'Could not recapture source', now)
       yield* debugLog.log(
         'watch',
         'recapture failed',
-        { adapterId: adapter?.id ?? 'none', error: String(captured.failure) },
+        { adapterId: adapter.id, error: String(captured.failure) },
         { run, level: 'warn' },
       )
       yield* saveWatches(failed)

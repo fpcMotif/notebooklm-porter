@@ -49,16 +49,16 @@ describe('watch lifecycle', () => {
     expect(next.watches[0]?.lastError).toBeUndefined()
   })
 
-  it('persists an explicit YouTube transcript enrichment preference', () => {
+  it('persists an explicit transcript enrichment preference', () => {
     const state = upsertWatch(emptyWatches(), {
       sourceDocId: 'youtube:PL1',
       sourceUrl: 'https://www.youtube.com/playlist?list=PL1',
       target,
       now: NOW,
-      enrichYoutube: true,
+      captureOptions: { enrichTranscripts: true },
     })
 
-    expect(state.watches[0]?.enrichYoutube).toBe(true)
+    expect(state.watches[0]?.captureOptions).toEqual({ enrichTranscripts: true })
   })
 
   it('removes only the requested watch', () => {
