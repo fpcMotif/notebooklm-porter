@@ -80,6 +80,25 @@ export function redact(value: unknown): unknown {
   return out
 }
 
+/**
+ * The popup's debug-panel filter: level match (entries default to 'info'),
+ * then case-insensitive substring over scope/msg/run/JSON-encoded data.
+ */
+export function filterDebugEntries(
+  entries: readonly DebugEntry[],
+  query: string,
+  level: 'all' | DebugLevel,
+): DebugEntry[] {
+  return entries.filter((entry) => {
+    if (level !== 'all' && (entry.level ?? 'info') !== level) return false
+    if (query === '') return true
+    const haystack = `${entry.scope} ${entry.msg} ${entry.run ?? ''} ${
+      entry.data !== undefined ? JSON.stringify(entry.data) : ''
+    }`.toLowerCase()
+    return haystack.includes(query.toLowerCase())
+  })
+}
+
 function jsonSafe(value: unknown): unknown {
   try {
     return JSON.parse(JSON.stringify(value)) as unknown

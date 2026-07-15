@@ -1,16 +1,17 @@
 import { Effect, Result } from 'effect'
 import { useEffect, useRef, useState } from 'preact/hooks'
-import type { DebugEntry, DebugLevel } from '../../core/debug'
+import { filterDebugEntries, type DebugEntry, type DebugLevel } from '../../core/debug'
 import { Tabs } from '../../core/fx/services'
 import { popupRuntime } from '../../core/fx/runtime-popup'
 import type { ConsoleScan } from '../../core/ingest/sources/console'
 import type { SourceDoc } from '../../core/model/types'
 import { PorterClient, type NotebookMeta } from '../../core/messaging'
-import type { QueueSnapshot } from '../../core/queue/queue'
+import { summarizeQueue, type QueueSnapshot } from '../../core/queue/queue'
 import { DEFAULT_SETTINGS, resolveNotebookTarget, type PorterSettings } from '../../core/settings'
 import { canWatchSource } from '../../core/watch/eligibility'
 import type { WatchView } from '../../core/watch/watch'
 import { useAction } from './useAction'
+import { useGenerationGuard } from './useGenerationGuard'
 
 /**
  * Popup: detect what the active tab offers, one-click capture, then a
@@ -69,9 +70,12 @@ export function App() {
   const [switchingAccount, setSwitchingAccount] = useState(false)
   const [consoleScan, setConsoleScan] = useState<ConsoleScan | undefined>()
   const [consoleStatus, setConsoleStatus] = useState<string | undefined>()
-  const notebookLoadGeneration = useRef(0)
+  const notebookLoadGuard = useGenerationGuard()
+  // Not converted to useGenerationGuard: createNotebookAction peeks this
+  // counter's current value without starting a new generation (see below),
+  // which the begin()/isCurrent() pair can't express.
   const accountLoadGeneration = useRef(0)
-  const accountSwitchGeneration = useRef(0)
+  const accountSwitchGuard = useGenerationGuard()
 
   function applyNotebookList(
     list: NotebookMeta[],
@@ -80,7 +84,7 @@ export function App() {
     currentId: string,
     generation: number,
   ) {
-    if (notebookLoadGeneration.current !== generation) return
+    if (!notebookLoadGuard.isCurrent(generation)) return
     setNotebooks(list)
     setSelectedNotebookId(
       resolveNotebookTarget(list, listDocs, listSettings.notebookTargets, currentId),
@@ -88,39 +92,34 @@ export function App() {
   }
 
   function applyQueueSnapshot(queue: QueueSnapshot) {
-    if (queue.jobs.length === 0) {
+    const summary = summarizeQueue(queue)
+    if (summary === undefined) {
       setIngestResult(undefined)
       setRetryJobIds([])
       return
     }
-    const queued = queue.jobs.filter(
-      (job) => job.status === 'queued' || job.status === 'retrying' || job.status === 'inFlight',
-    )
-    const retryable = queue.jobs.filter(
-      (job) => job.status === 'failed' || job.status === 'uncertain',
-    )
     setIngestResult({
-      queued: queued.length,
-      failed: queue.jobs.filter((job) => job.status === 'failed').length,
-      uncertain: queue.jobs.filter((job) => job.status === 'uncertain').length,
-      blocked: queue.jobs.filter((job) => job.status === 'blocked').length,
-      ...(retryable[0]?.lastError ? { error: retryable[0].lastError } : {}),
+      queued: summary.queued,
+      failed: summary.failed,
+      uncertain: summary.uncertain,
+      blocked: summary.blocked,
+      ...(summary.error !== undefined ? { error: summary.error } : {}),
     })
-    setRetryJobIds(retryable.map((job) => job.id))
+    setRetryJobIds(summary.retryJobIds)
   }
 
   // Shared with accountsAction (FIX 3) so discovering accounts for the first
   // time also populates the notebook list, instead of composing via a faked
   // click on loadNotebooksAction.
   const loadNotebooksEffect = Effect.gen(function* () {
-    const generation = ++notebookLoadGeneration.current
+    const generation = notebookLoadGuard.begin()
     setNotebooksError(undefined)
     const client = yield* PorterClient
     const result = yield* Effect.result(
       client.request({ type: 'porter/list-notebooks', forceRefresh: true }),
     )
     if (Result.isFailure(result)) {
-      if (notebookLoadGeneration.current === generation) {
+      if (notebookLoadGuard.isCurrent(generation)) {
         setNotebooksError(result.failure.reason)
       }
       return
@@ -146,7 +145,7 @@ export function App() {
         return
       }
       if (accountLoadGeneration.current !== accountGeneration) return
-      const generation = ++notebookLoadGeneration.current
+      const generation = notebookLoadGuard.begin()
       applyNotebookList(
         result.success.notebooks,
         settings,
@@ -179,7 +178,7 @@ export function App() {
       if (accountLoadGeneration.current !== accountGeneration) return
       setSettings(settingsResult.success.settings)
       if (settingsResult.success.settings.accounts.length > 0) {
-        const generation = ++notebookLoadGeneration.current
+        const generation = notebookLoadGuard.begin()
         const notebooksResult = yield* Effect.result(
           client.request({ type: 'porter/list-notebooks' }),
         )
@@ -320,7 +319,7 @@ export function App() {
       if (accountLoadGeneration.current !== accountGeneration) return
       setSettings(settingsResult.success.settings)
       if (settingsResult.success.settings.accounts.length > 0) {
-        const generation = ++notebookLoadGeneration.current
+        const generation = notebookLoadGuard.begin()
         const notebooksResult = yield* Effect.result(
           client.request({ type: 'porter/list-notebooks', forceRefresh: true }),
         )
@@ -366,9 +365,9 @@ export function App() {
 
   function selectAccount(authuser: number) {
     setSwitchingAccount(true)
-    const switchGeneration = ++accountSwitchGeneration.current
+    const switchGeneration = accountSwitchGuard.begin()
     const accountGeneration = ++accountLoadGeneration.current
-    const generation = ++notebookLoadGeneration.current
+    const generation = notebookLoadGuard.begin()
     setSelectedNotebookId('')
     setNotebooks([])
     setNotebooksError(undefined)
@@ -401,7 +400,7 @@ export function App() {
         }
       })
       .finally(() => {
-        if (accountSwitchGeneration.current === switchGeneration) setSwitchingAccount(false)
+        if (accountSwitchGuard.isCurrent(switchGeneration)) setSwitchingAccount(false)
       })
   }
 
@@ -518,14 +517,7 @@ export function App() {
     flashDebugStatus('cleared')
   }
 
-  const filteredDebugEntries = debugEntries.filter((entry) => {
-    if (debugLevel !== 'all' && (entry.level ?? 'info') !== debugLevel) return false
-    if (debugQuery === '') return true
-    const haystack = `${entry.scope} ${entry.msg} ${entry.run ?? ''} ${
-      entry.data !== undefined ? JSON.stringify(entry.data) : ''
-    }`.toLowerCase()
-    return haystack.includes(debugQuery.toLowerCase())
-  })
+  const filteredDebugEntries = filterDebugEntries(debugEntries, debugQuery, debugLevel)
 
   return (
     <div class="p-4 font-sans text-sm">

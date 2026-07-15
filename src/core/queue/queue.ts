@@ -281,6 +281,38 @@ export function queueSnapshot(state: QueueState): QueueSnapshot {
   }
 }
 
+export interface QueueSummary {
+  queued: number
+  failed: number
+  uncertain: number
+  blocked: number
+  /** ids of failed | uncertain jobs, in job order. */
+  retryJobIds: string[]
+  error?: string
+}
+
+/**
+ * Aggregates a snapshot into the counts/retry set the popup surfaces.
+ * Empty snapshot → undefined (the popup clears its banner).
+ */
+export function summarizeQueue(snapshot: QueueSnapshot): QueueSummary | undefined {
+  if (snapshot.jobs.length === 0) return undefined
+  const queued = snapshot.jobs.filter(
+    (job) => job.status === 'queued' || job.status === 'retrying' || job.status === 'inFlight',
+  )
+  const retryable = snapshot.jobs.filter(
+    (job) => job.status === 'failed' || job.status === 'uncertain',
+  )
+  return {
+    queued: queued.length,
+    failed: snapshot.jobs.filter((job) => job.status === 'failed').length,
+    uncertain: snapshot.jobs.filter((job) => job.status === 'uncertain').length,
+    blocked: snapshot.jobs.filter((job) => job.status === 'blocked').length,
+    retryJobIds: retryable.map((job) => job.id),
+    ...(retryable[0]?.lastError ? { error: retryable[0].lastError } : {}),
+  }
+}
+
 export function nextDueAt(state: QueueState, now: string): string | undefined {
   const retryTimes = state.jobs
     .filter((job) => job.status === 'retrying' && job.nextAttemptAt !== undefined)

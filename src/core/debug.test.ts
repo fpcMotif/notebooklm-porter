@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { appendEntry, redact, type DebugEntry } from './debug'
+import { appendEntry, filterDebugEntries, redact, type DebugEntry } from './debug'
 
 function entry(msg: string): DebugEntry {
   return { t: '2026-07-06T00:00:00.000Z', scope: 'test', msg }
@@ -108,5 +108,66 @@ describe('redact', () => {
     expect(() => redact(undefined)).not.toThrow()
     expect(() => redact(() => {})).not.toThrow()
     expect(() => redact(Symbol('x'))).not.toThrow()
+  })
+})
+
+describe('filterDebugEntries', () => {
+  const entries: DebugEntry[] = [
+    { t: '2026-07-06T00:00:00.000Z', scope: 'capture', msg: 'started run' },
+    {
+      t: '2026-07-06T00:00:01.000Z',
+      scope: 'queue',
+      msg: 'enqueued',
+      level: 'warn',
+      run: 'run-42',
+    },
+    {
+      t: '2026-07-06T00:00:02.000Z',
+      scope: 'ingest',
+      msg: 'failed send',
+      level: 'error',
+      data: { reason: 'NetworkError' },
+    },
+  ]
+
+  it('passes all entries when query is empty and level is all', () => {
+    expect(filterDebugEntries(entries, '', 'all')).toEqual(entries)
+  })
+
+  it('filters by level, treating entries without a level as info', () => {
+    const infoOnly = filterDebugEntries(entries, '', 'info')
+    expect(infoOnly).toEqual([entries[0]])
+  })
+
+  it('filters by warn level', () => {
+    expect(filterDebugEntries(entries, '', 'warn')).toEqual([entries[1]])
+  })
+
+  it('matches the query against scope', () => {
+    expect(filterDebugEntries(entries, 'queue', 'all')).toEqual([entries[1]])
+  })
+
+  it('matches the query against msg', () => {
+    expect(filterDebugEntries(entries, 'started', 'all')).toEqual([entries[0]])
+  })
+
+  it('matches the query against run', () => {
+    expect(filterDebugEntries(entries, 'run-42', 'all')).toEqual([entries[1]])
+  })
+
+  it('matches the query against JSON-encoded data', () => {
+    expect(filterDebugEntries(entries, 'NetworkError', 'all')).toEqual([entries[2]])
+  })
+
+  it('matches case-insensitively', () => {
+    expect(filterDebugEntries(entries, 'QUEUE', 'all')).toEqual([entries[1]])
+  })
+
+  it('returns an empty array when nothing matches', () => {
+    expect(filterDebugEntries(entries, 'nonexistent', 'all')).toEqual([])
+  })
+
+  it('applies the level filter before the query filter', () => {
+    expect(filterDebugEntries(entries, 'run-42', 'error')).toEqual([])
   })
 })
