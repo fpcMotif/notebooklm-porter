@@ -1,4 +1,5 @@
 import type { Capture, SourceDoc } from '../model/types'
+import { splitFrontmatter } from './frontmatter'
 import { playlistToJsonl, threadToJsonl } from './jsonl'
 import { playlistToMarkdown, threadToMarkdown } from './markdown'
 import type { FormatOptions } from './types'
@@ -33,14 +34,8 @@ function threadNativeId(url: string): string {
 }
 
 /** Word count of the markdown BODY, excluding the leading YAML frontmatter block. */
-function countBodyWords(markdown: string): number {
-  let body = markdown
-  if (markdown.startsWith('---\n')) {
-    const closingIndex = markdown.indexOf('\n---', 4)
-    if (closingIndex !== -1) {
-      body = markdown.slice(closingIndex + 4)
-    }
-  }
+export function countBodyWords(markdown: string): number {
+  const body = splitFrontmatter(markdown)?.body ?? markdown
   const words = body.trim().match(/\S+/g)
   return words ? words.length : 0
 }

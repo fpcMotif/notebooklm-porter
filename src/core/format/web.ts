@@ -1,10 +1,5 @@
 import type { WebCapture } from '../model/types'
-
-function yamlScalar(value: string): string {
-  if (value === '') return '""'
-  const needsQuoting = /[:#?\-[\]{}&*!|>'"%@`\n]/.test(value) || /^\s|\s$/.test(value)
-  return needsQuoting ? `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"` : value
-}
+import { CAPTURED_AT_KEY, yamlScalar } from './frontmatter'
 
 function modeLabel(mode: WebCapture['mode']): string {
   switch (mode) {
@@ -25,7 +20,7 @@ export function webToMarkdown(web: WebCapture, capturedAt: string): string {
     `url: ${yamlScalar(web.url)}`,
     `title: ${yamlScalar(web.title)}`,
     `capture_mode: ${web.mode}`,
-    `captured_at: ${capturedAt}`,
+    `${CAPTURED_AT_KEY}: ${capturedAt}`,
     '---',
   ]
   return [...frontmatter, '', `# ${web.title}`, '', `## ${modeLabel(web.mode)}`, '', web.text].join(

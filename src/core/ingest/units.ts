@@ -1,3 +1,4 @@
+import { CAPTURED_AT_KEY, splitFrontmatter } from '../format/frontmatter'
 import type { SourceDoc, TranscriptDocument } from '../model/types'
 import { contentHash } from '../store/ledger'
 
@@ -82,12 +83,12 @@ function youtubeReceiptHash(url: string): string {
  * stable while preserving all user-visible Markdown exactly as captured.
  */
 export function contentHashForIngest(markdown: string): string {
-  if (!markdown.startsWith('---\n')) return contentHash(markdown)
-  const frontmatterEnd = markdown.indexOf('\n---', 4)
-  if (frontmatterEnd === -1) return contentHash(markdown)
-  const frontmatter = markdown.slice(0, frontmatterEnd).split('\n')
-  const stableFrontmatter = frontmatter.filter((line) => !line.startsWith('captured_at: '))
-  return contentHash(`${stableFrontmatter.join('\n')}${markdown.slice(frontmatterEnd)}`)
+  const split = splitFrontmatter(markdown)
+  if (split === undefined) return contentHash(markdown)
+  const stableFrontmatter = split.frontmatterLines.filter(
+    (line) => !line.startsWith(`${CAPTURED_AT_KEY}: `),
+  )
+  return contentHash(`${stableFrontmatter.join('\n')}\n---${split.body}`)
 }
 
 function transcriptDocsByVideoId(doc: SourceDoc): Map<string, TranscriptDocument> {

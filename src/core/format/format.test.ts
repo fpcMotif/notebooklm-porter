@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Capture, Playlist, Post, Thread, Video } from '../model/types'
-import { formatCapture } from './format'
+import { countBodyWords, formatCapture } from './format'
 
 const FIXED_NOW = () => '2026-07-06T12:00:00.000Z'
 
@@ -291,5 +291,55 @@ describe('formatCapture — default clock', () => {
     const parsed = new Date(doc.capturedAt).getTime()
     expect(parsed).toBeGreaterThanOrEqual(before)
     expect(parsed).toBeLessThanOrEqual(after)
+  })
+})
+
+// Characterisation: values below were computed by running countBodyWords
+// against the pre-refactor implementation (frontmatter-scan logic inlined in
+// format.ts, before it moved to the shared frontmatter.ts module). These
+// pin today's exact scan semantics so the frontmatter.ts extraction can't
+// silently change word counts.
+describe('countBodyWords — frozen pre-refactor characterisation', () => {
+  it('excludes a terminated leading frontmatter block from the count', () => {
+    const markdown = `---
+source: web
+url: https://example.com
+captured_at: 2026-07-11T00:00:00.000Z
+---
+
+# Title
+
+Body text here.`
+    expect(countBodyWords(markdown)).toBe(5)
+  })
+
+  it('counts the whole document when there is no leading frontmatter', () => {
+    const markdown = `# Just a body
+
+No frontmatter at all.`
+    expect(countBodyWords(markdown)).toBe(8)
+  })
+
+  it('excludes frontmatter that omits captured_at the same as frontmatter that has it', () => {
+    const markdown = `---
+source: web
+url: https://example.com
+---
+
+# Title
+
+Body text here.`
+    expect(countBodyWords(markdown)).toBe(5)
+  })
+
+  it('falls back to counting the whole document when frontmatter is unterminated', () => {
+    const markdown = `---
+source: web
+url: https://example.com
+
+# Title
+
+Body text here.`
+    expect(countBodyWords(markdown)).toBe(10)
   })
 })

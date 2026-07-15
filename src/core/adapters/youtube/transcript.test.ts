@@ -183,4 +183,10 @@ video_id: abc123
   it('does not render an empty transcript source', () => {
     expect(renderTranscriptMarkdown(video, [])).toBeUndefined()
   })
+
+  it('quotes an empty scalar as "" instead of rendering YAML null (fixed drift from the shared yamlScalar)', () => {
+    const markdown = renderTranscriptMarkdown({ ...video, title: '' }, cues)
+    expect(markdown).toContain('title: ""')
+    expect(markdown).not.toMatch(/^title: $/m)
+  })
 })

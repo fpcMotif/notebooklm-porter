@@ -1,5 +1,7 @@
 /** Pure support for best-effort YouTube transcript enrichment. */
 
+import { frontmatterBlock } from '../../format/frontmatter'
+
 const MAX_SCAN_DEPTH = 30
 
 export interface CaptionTrack {
@@ -266,12 +268,6 @@ function formatTimestamp(milliseconds: number): string {
     : `${minutes}:${String(seconds).padStart(2, '0')}`
 }
 
-function yamlScalar(value: string): string {
-  return /[:#?\-[\]{}&*!|>'"%@`\n]/.test(value) || /^\s|\s$/.test(value)
-    ? `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
-    : value
-}
-
 /**
  * Renders a NotebookLM text source. No nonempty captions means no transcript
  * source should replace the video's canonical YouTube URL.
@@ -282,14 +278,12 @@ export function renderTranscriptMarkdown(
   chapters: TranscriptChapter[] = [],
 ): string | undefined {
   if (cues.length === 0) return undefined
-  const frontmatter = [
-    '---',
-    'source: youtube',
-    `url: ${yamlScalar(video.url)}`,
-    `title: ${yamlScalar(video.title)}`,
-    `video_id: ${yamlScalar(video.videoId)}`,
-    '---',
-  ]
+  const frontmatter = frontmatterBlock([
+    ['source', 'youtube'],
+    ['url', video.url],
+    ['title', video.title],
+    ['video_id', video.videoId],
+  ])
   const chapterLines = chapters.map(
     (chapter) => `- ${formatTimestamp(chapter.startMs)} — ${chapter.title}`,
   )
