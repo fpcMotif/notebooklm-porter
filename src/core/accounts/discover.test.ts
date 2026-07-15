@@ -1,6 +1,8 @@
 import { assert, describe, it } from '@effect/vitest'
-import { Effect, Layer } from 'effect'
+import { Effect, Fiber, Layer, Result } from 'effect'
+import { TestClock } from 'effect/testing'
 import { discoverAccounts } from './discover'
+import { FetchError } from '../fx/errors'
 import { DebugLog, Http } from '../fx/services'
 
 function loggedInHtml(email: string): string {
@@ -75,5 +77,35 @@ describe('discoverAccounts', () => {
       ),
       Effect.provide(NoopDebugLog),
     ),
+  )
+
+  it.effect('a stalled authuser probe fails typed instead of hanging forever', () =>
+    Effect.gen(function* () {
+      const NeverHttpLayer = Layer.succeed(
+        Http,
+        Http.of({
+          text: () => Effect.never,
+          json: () => Effect.die('unused in discover tests'),
+        }),
+      )
+      const fiber = yield* Effect.race(
+        discoverAccounts(5).pipe(
+          Effect.provide(NeverHttpLayer),
+          Effect.provide(NoopDebugLog),
+          Effect.result,
+          Effect.map((result) => ({ kind: 'result' as const, result })),
+        ),
+        Effect.sleep('21 seconds').pipe(Effect.as({ kind: 'deadline' as const })),
+      ).pipe(Effect.forkChild)
+
+      yield* TestClock.adjust('21 seconds')
+      const outcome = yield* Fiber.join(fiber)
+
+      assert.strictEqual(outcome.kind, 'result')
+      if (outcome.kind === 'result') {
+        assert.isTrue(Result.isFailure(outcome.result))
+        if (Result.isFailure(outcome.result)) assert.instanceOf(outcome.result.failure, FetchError)
+      }
+    }),
   )
 })

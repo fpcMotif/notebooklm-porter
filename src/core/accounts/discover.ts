@@ -1,6 +1,6 @@
 import { Effect } from 'effect'
 import type { FetchError, HttpStatusError } from '../fx/errors'
-import { DebugLog, Http } from '../fx/services'
+import { DebugLog, Http, withHttpTimeout } from '../fx/services'
 import { homeUrl } from '../ingest/rpc/protocol'
 import { parseNblmHome, type NblmAccount } from './parse'
 
@@ -21,7 +21,8 @@ export function discoverAccounts(
     for (let authuser = 0; authuser < max; authuser++) {
       // Sequential by necessity: each fetch decides whether to probe the next
       // authuser slot at all, so this can't become an Effect.all.
-      const html = yield* http.text(homeUrl(authuser), { credentials: 'include' })
+      const url = homeUrl(authuser)
+      const html = yield* withHttpTimeout(http.text(url, { credentials: 'include' }), url)
       const parsed = parseNblmHome(html)
       yield* debugLog.log('accounts', 'probe', {
         authuser,

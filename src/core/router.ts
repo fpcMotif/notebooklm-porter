@@ -9,7 +9,7 @@ import { discoverAccounts } from './accounts/discover'
 import { captureSource, captureViaContentScript } from './adapters/capture'
 import { adapterForUrl } from './adapters/registry'
 import { backupDocsToDrive } from './backup/client'
-import { IpcError, NotLoggedIn, ProtocolDrift, type PorterError } from './fx/errors'
+import { NotLoggedIn, ProtocolDrift, type PorterError } from './fx/errors'
 import { Alarms, DebugLog, type Http, type Identity, type Kv, type Tabs } from './fx/services'
 import { formatCapture } from './format/format'
 import { exportDocs } from './ingest/export'
@@ -27,11 +27,11 @@ import { scanSources } from './ingest/sources/console'
 import { duplicateRemovalIds, findDuplicateGroups } from './ingest/sources/dedup'
 import { planIngestUnits } from './ingest/units'
 import { type NotebookMeta, type PorterMessage, type PorterReply } from './messaging'
-import type { Capture, SourceDoc } from './model/types'
+import type { Capture } from './model/types'
 import { getSettings, notebookTargetPatch, updateSettings, type PorterSettings } from './settings'
 import { QUEUE_ALARM, enqueueUnits, queueSnapshot, retryJob, type QueueTarget } from './queue/queue'
 import { loadQueue, saveQueue } from './queue/store'
-import { deleteDoc, listDocs, upsertDoc } from './store'
+import { deleteDoc, listDocs, storeCapturedDoc } from './store'
 import { loadLedger, partitionSynced } from './store/ledger'
 import {
   cacheNotebooks,
@@ -100,26 +100,6 @@ export function domainsForMessage(type: string): readonly StorageDomain[] {
   const entry = (MESSAGE_DOMAINS as Record<string, readonly StorageDomain[]>)[type]
   if (entry === undefined) return []
   return LANE_ORDER.filter((domain) => entry.includes(domain))
-}
-
-/**
- * Persists a freshly captured doc and records a content-free summary in the
- * debug ring — counts and kinds, never titles or bodies — so a copied log
- * shows what capture produced without leaking the captured text.
- */
-function storeCapturedDoc(doc: SourceDoc) {
-  return Effect.gen(function* () {
-    yield* upsertDoc(doc)
-    const debugLog = yield* DebugLog
-    yield* debugLog.log('capture', 'stored', {
-      docId: doc.id,
-      site: doc.site,
-      kind: doc.kind,
-      wordCount: doc.wordCount,
-      truncated: doc.truncated,
-      ...(doc.videoDocs !== undefined ? { videoTranscripts: doc.videoDocs.length } : {}),
-    })
-  })
 }
 
 /** Formats and persists a fresh capture, then replies with the stored doc. */
@@ -193,7 +173,7 @@ function cacheFreshNotebooks(session: NblmSession, authuser: number, notebooks: 
 function verifyTargetNotebook(
   notebookId: string,
 ): Effect.Effect<
-  { settings: PorterSettings; target: QueueTarget },
+  { settings: PorterSettings; target: QueueTarget } | { ok: false; error: string },
   PorterError,
   Http | Kv | DebugLog
 > {
@@ -211,9 +191,7 @@ function verifyTargetNotebook(
     }
     const notebooks = yield* listNotebooks(session, settings.nblmAuthuser)
     if (!notebooks.some((notebook) => notebook.id === notebookId)) {
-      return yield* Effect.fail(
-        new IpcError({ reason: 'Choose a notebook from the current account' }),
-      )
+      return { ok: false as const, error: 'Choose a notebook from the current account' }
     }
     return {
       settings,
@@ -296,7 +274,9 @@ const handlers: Handlers = {
     }),
   'porter/queue-enqueue': (msg) =>
     Effect.gen(function* () {
-      const { settings, target } = yield* verifyTargetNotebook(msg.notebookId)
+      const verified = yield* verifyTargetNotebook(msg.notebookId)
+      if ('ok' in verified) return verified
+      const { settings, target } = verified
       const docs = yield* listDocs()
       const requested = new Set(msg.docIds)
       const selectedDocs = docs.filter((doc) => requested.has(doc.id))
@@ -350,16 +330,16 @@ const handlers: Handlers = {
     }),
   'porter/watch-create': (msg) =>
     Effect.gen(function* () {
-      const { target } = yield* verifyTargetNotebook(msg.notebookId)
+      const verified = yield* verifyTargetNotebook(msg.notebookId)
+      if ('ok' in verified) return verified
+      const { target } = verified
 
       const doc = (yield* listDocs()).find((candidate) => candidate.id === msg.docId)
       if (doc === undefined) {
-        return yield* Effect.fail(new IpcError({ reason: 'The captured source no longer exists' }))
+        return { ok: false as const, error: 'The captured source no longer exists' }
       }
       if (!canWatchSource(doc)) {
-        return yield* Effect.fail(
-          new IpcError({ reason: 'This source cannot be resynced in the background yet' }),
-        )
+        return { ok: false as const, error: 'This source cannot be resynced in the background yet' }
       }
 
       const watches = yield* loadWatches()
