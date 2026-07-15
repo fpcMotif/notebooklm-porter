@@ -7,6 +7,7 @@ import { planIngestUnits } from '../ingest/units'
 import { QUEUE_ALARM, enqueueUnits, supersedePendingUnitVersions } from '../queue/queue'
 import { loadQueue, saveQueue } from '../queue/store'
 import { upsertDoc } from '../store'
+import { loadLedger, partitionSynced } from '../store/ledger'
 import { loadWatches, saveWatches } from './store'
 import {
   disableWatch,
@@ -126,19 +127,32 @@ export function resyncOneDueWatch(
     yield* upsertDoc(doc)
     const queue = yield* loadQueue()
     const units = planIngestUnits(doc)
+    // supersede runs over ALL units — even an already-synced unit may leave a
+    // stale pending older version worth dropping — but only units the ledger
+    // doesn't already have unchanged are worth enqueueing.
     const withoutSuperseded = supersedePendingUnitVersions(queue, watch.target, units)
-    const nextQueue = enqueueUnits(withoutSuperseded, watch.target, units, now)
+    const ledger = yield* loadLedger()
+    const { pending, synced } = partitionSynced(ledger, watch.target.notebookId, units)
+    const nextQueue = enqueueUnits(withoutSuperseded, watch.target, pending, now)
     yield* saveQueue(nextQueue)
 
     const complete = rescheduleWatchSuccess(watches, watch.id, now)
     yield* saveWatches(complete)
     yield* armNextWatch(complete)
-    const alarms = yield* Alarms
-    yield* alarms.schedule(QUEUE_ALARM, Date.parse(now))
+    // An all-synced tick has nothing for the drain to do — don't wake it.
+    if (pending.length > 0) {
+      const alarms = yield* Alarms
+      yield* alarms.schedule(QUEUE_ALARM, Date.parse(now))
+    }
     yield* debugLog.log(
       'watch',
       'resynced',
-      { docId: doc.id, unitCount: units.length, notebookId: watch.target.notebookId },
+      {
+        docId: doc.id,
+        unitCount: units.length,
+        notebookId: watch.target.notebookId,
+        alreadySynced: synced.length,
+      },
       { run },
     )
     return { status: 'queued', watchId: watch.id, docId: doc.id }

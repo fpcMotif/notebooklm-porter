@@ -32,7 +32,7 @@ import { getSettings, notebookTargetPatch, updateSettings, type PorterSettings }
 import { QUEUE_ALARM, enqueueUnits, queueSnapshot, retryJob, type QueueTarget } from './queue/queue'
 import { loadQueue, saveQueue } from './queue/store'
 import { deleteDoc, listDocs, upsertDoc } from './store'
-import { diffAgainstLedger, loadLedger } from './store/ledger'
+import { loadLedger, partitionSynced } from './store/ledger'
 import {
   cacheNotebooks,
   loadNotebookCache,
@@ -305,13 +305,11 @@ const handlers: Handlers = {
       // create a second copy of an unchanged source. The logged breakdown also
       // exposes whether the ledger actually remembers a prior run.
       const ledger = yield* loadLedger()
-      const diff = diffAgainstLedger(
-        ledger,
-        msg.notebookId,
-        units.map((unit) => ({ id: unit.id, contentHash: unit.contentHash })),
-      )
-      const alreadySynced = new Set(diff.unchanged)
-      const pendingUnits = units.filter((unit) => !alreadySynced.has(unit.id))
+      const {
+        pending: pendingUnits,
+        synced,
+        changed,
+      } = partitionSynced(ledger, msg.notebookId, units)
       const queue = yield* loadQueue()
       const next = enqueueUnits(queue, target, pendingUnits, new Date().toISOString())
       yield* saveQueue(next)
@@ -320,8 +318,8 @@ const handlers: Handlers = {
         notebookId: msg.notebookId,
         requestedDocs: selectedDocs.length,
         plannedUnits: units.length,
-        alreadySynced: diff.unchanged.length,
-        changed: diff.changed.length,
+        alreadySynced: synced.length,
+        changed,
         enqueued: pendingUnits.length,
         pending: next.jobs.length,
       })

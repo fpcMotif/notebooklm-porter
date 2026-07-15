@@ -79,6 +79,43 @@ export function diffAgainstLedger(
   return { fresh, changed, unchanged }
 }
 
+/** Whether one unit's contentHash is already receipted for the notebook. */
+export function isUnitSynced(
+  ledger: Ledger,
+  notebookId: string,
+  unit: { id: string; contentHash: string },
+): boolean {
+  return diffAgainstLedger(ledger, notebookId, [unit]).unchanged.length > 0
+}
+
+/**
+ * Splits units into those the notebook still needs (`pending`) and those
+ * already receipted unchanged (`synced`). `changed` counts the pending
+ * units the ledger knows under a different contentHash — re-sends, not
+ * new sources — so callers can log the distinction without re-deriving it.
+ */
+export function partitionSynced<T extends { id: string; contentHash: string }>(
+  ledger: Ledger,
+  notebookId: string,
+  units: readonly T[],
+): { pending: T[]; synced: T[]; changed: number } {
+  const diff = diffAgainstLedger(
+    ledger,
+    notebookId,
+    units.map((unit) => ({ id: unit.id, contentHash: unit.contentHash })),
+  )
+  const syncedIds = new Set(diff.unchanged)
+  const pending: T[] = []
+  const synced: T[] = []
+
+  for (const unit of units) {
+    if (syncedIds.has(unit.id)) synced.push(unit)
+    else pending.push(unit)
+  }
+
+  return { pending, synced, changed: diff.changed.length }
+}
+
 export interface SyncedEntry {
   id: string
   contentHash: string

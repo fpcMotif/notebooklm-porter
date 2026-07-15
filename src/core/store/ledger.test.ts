@@ -1,7 +1,15 @@
 import { Effect } from 'effect'
 import { describe, expect, it } from 'vitest'
 import { kvTest } from '../fx/testing'
-import { contentHash, diffAgainstLedger, loadLedger, recordSynced, type Ledger } from './ledger'
+import {
+  contentHash,
+  diffAgainstLedger,
+  isUnitSynced,
+  loadLedger,
+  partitionSynced,
+  recordSynced,
+  type Ledger,
+} from './ledger'
 
 describe('diffAgainstLedger', () => {
   it('classifies docs missing from the ledger as fresh', () => {
@@ -64,6 +72,68 @@ describe('diffAgainstLedger', () => {
   it('handles an empty docs list', () => {
     const result = diffAgainstLedger({}, 'nb1', [])
     expect(result).toEqual({ fresh: [], changed: [], unchanged: [] })
+  })
+})
+
+describe('isUnitSynced', () => {
+  it('is false for a unit id the ledger has never seen', () => {
+    const ledger: Ledger = {}
+    expect(isUnitSynced(ledger, 'nb1', { id: 'reddit:abc', contentHash: 'h1' })).toBe(false)
+  })
+
+  it('is true for a known id with a matching contentHash', () => {
+    const ledger: Ledger = {
+      nb1: { 'reddit:abc': { contentHash: 'h1', lastSynced: '2026-01-01T00:00:00.000Z' } },
+    }
+    expect(isUnitSynced(ledger, 'nb1', { id: 'reddit:abc', contentHash: 'h1' })).toBe(true)
+  })
+
+  it('is false for a known id with a different contentHash', () => {
+    const ledger: Ledger = {
+      nb1: { 'reddit:abc': { contentHash: 'old-hash', lastSynced: '2026-01-01T00:00:00.000Z' } },
+    }
+    expect(isUnitSynced(ledger, 'nb1', { id: 'reddit:abc', contentHash: 'new-hash' })).toBe(false)
+  })
+})
+
+describe('partitionSynced', () => {
+  it('splits units into pending and synced', () => {
+    const ledger: Ledger = {
+      nb1: { 'reddit:abc': { contentHash: 'same', lastSynced: '2026-01-01T00:00:00.000Z' } },
+    }
+    const units = [
+      { id: 'reddit:abc', contentHash: 'same' },
+      { id: 'youtube:zzz', contentHash: 'brand-new' },
+    ]
+    const result = partitionSynced(ledger, 'nb1', units)
+
+    expect(result.synced).toEqual([{ id: 'reddit:abc', contentHash: 'same' }])
+    expect(result.pending).toEqual([{ id: 'youtube:zzz', contentHash: 'brand-new' }])
+  })
+
+  it('counts a changed unit in pending and increments changed, without counting a brand-new unit', () => {
+    const ledger: Ledger = {
+      nb1: { 'hn:1': { contentHash: 'stale', lastSynced: '2026-01-01T00:00:00.000Z' } },
+    }
+    const units = [
+      { id: 'hn:1', contentHash: 'fresh-content' },
+      { id: 'youtube:zzz', contentHash: 'brand-new' },
+    ]
+    const result = partitionSynced(ledger, 'nb1', units)
+
+    expect(result.pending).toEqual(units)
+    expect(result.synced).toEqual([])
+    expect(result.changed).toBe(1)
+  })
+
+  it('handles an all-synced batch with zero pending and zero changed', () => {
+    const ledger: Ledger = {
+      nb1: { 'reddit:abc': { contentHash: 'same', lastSynced: '2026-01-01T00:00:00.000Z' } },
+    }
+    const units = [{ id: 'reddit:abc', contentHash: 'same' }]
+    const result = partitionSynced(ledger, 'nb1', units)
+
+    expect(result).toEqual({ pending: [], synced: units, changed: 0 })
   })
 })
 
