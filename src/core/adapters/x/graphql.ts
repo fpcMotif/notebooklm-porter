@@ -1,3 +1,4 @@
+import { isRecord } from '../../fx/guards'
 import type { MediaRef } from '../../model/types'
 import type { RawTweet } from './extract'
 
@@ -9,10 +10,6 @@ const THREAD_OPERATIONS = new Set(['TweetDetail', 'TweetResultByRestId'])
 export interface GraphqlTeeEventDetail {
   url: string
   body: string
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function recordAt(value: unknown, key: string): Record<string, unknown> | undefined {

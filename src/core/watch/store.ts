@@ -1,5 +1,6 @@
 import { Effect } from 'effect'
 import type { StorageError } from '../fx/errors'
+import { kvSlot } from '../fx/kv-slot'
 import { Kv } from '../fx/services'
 import { emptyWatches, WATCH_STORAGE_KEY, type Watch, type WatchState } from './watch'
 
@@ -14,19 +15,19 @@ function migrateWatch(stored: StoredWatch): Watch {
     : watch
 }
 
+/** Preserves the pre-slot decode exactly: no shape validation, just the legacy migration. */
+function decodeWatchState(stored: unknown): WatchState {
+  const state = stored as { version: 1; watches: StoredWatch[] }
+  return { ...state, watches: state.watches.map(migrateWatch) }
+}
+
 /** Thin persistence wrapper; state transitions remain pure in watch.ts. */
+const watchesSlot = kvSlot<WatchState>(WATCH_STORAGE_KEY, emptyWatches, decodeWatchState)
+
 export function loadWatches(): Effect.Effect<WatchState, StorageError, Kv> {
-  return Effect.gen(function* () {
-    const kv = yield* Kv
-    const stored = yield* kv.get<{ version: 1; watches: StoredWatch[] }>(WATCH_STORAGE_KEY)
-    if (stored === undefined) return emptyWatches()
-    return { ...stored, watches: stored.watches.map(migrateWatch) }
-  })
+  return watchesSlot.load()
 }
 
 export function saveWatches(watches: WatchState): Effect.Effect<void, StorageError, Kv> {
-  return Effect.gen(function* () {
-    const kv = yield* Kv
-    yield* kv.set(WATCH_STORAGE_KEY, watches)
-  })
+  return watchesSlot.save(watches)
 }

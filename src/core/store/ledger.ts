@@ -11,8 +11,10 @@
  * update logic is fully unit-testable without mocking `browser.storage`.
  */
 import { Effect } from 'effect'
-import { Kv } from '../fx/services'
 import type { StorageError } from '../fx/errors'
+import { isRecord } from '../fx/guards'
+import { kvSlot } from '../fx/kv-slot'
+import { Kv } from '../fx/services'
 
 export interface LedgerEntry {
   contentHash: string
@@ -33,10 +35,6 @@ export interface DiffResult {
   changed: string[]
   /** Present with a matching contentHash — already synced, skip. */
   unchanged: string[]
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function isLedgerEntry(value: unknown): value is LedgerEntry {
@@ -123,17 +121,16 @@ export function contentHash(markdown: string): string {
 const STORAGE_KEY = 'porter/ledger'
 
 /** Thin `Kv` wrapper — logic lives in the pure reducers above. */
+const ledgerSlot = kvSlot<Ledger>(
+  STORAGE_KEY,
+  () => ({}),
+  (stored) => (isLedger(stored) ? stored : undefined),
+)
+
 export function loadLedger(): Effect.Effect<Ledger, StorageError, Kv> {
-  return Effect.gen(function* () {
-    const kv = yield* Kv
-    const stored = yield* kv.get<unknown>(STORAGE_KEY)
-    return isLedger(stored) ? stored : {}
-  })
+  return ledgerSlot.load()
 }
 
 export function saveLedger(ledger: Ledger): Effect.Effect<void, StorageError, Kv> {
-  return Effect.gen(function* () {
-    const kv = yield* Kv
-    yield* kv.set(STORAGE_KEY, ledger)
-  })
+  return ledgerSlot.save(ledger)
 }

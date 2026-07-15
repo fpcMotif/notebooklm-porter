@@ -1,5 +1,7 @@
 import { Effect } from 'effect'
 import type { StorageError } from '../fx/errors'
+import { isRecord } from '../fx/guards'
+import { kvSlot } from '../fx/kv-slot'
 import { Kv } from '../fx/services'
 
 export interface CachedNotebook {
@@ -22,10 +24,6 @@ export const NOTEBOOK_CACHE_STORAGE_KEY = 'porter/notebooks-cache/v1'
 
 export function emptyNotebookCache(): NotebookCache {
   return { version: 1, entries: {} }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function isCacheEntry(value: unknown): value is NotebookCacheEntry {
@@ -88,17 +86,16 @@ export function cacheNotebooks(
   }
 }
 
+const notebookCacheSlot = kvSlot<NotebookCache>(
+  NOTEBOOK_CACHE_STORAGE_KEY,
+  emptyNotebookCache,
+  (stored) => (isNotebookCache(stored) ? stored : undefined),
+)
+
 export function loadNotebookCache(): Effect.Effect<NotebookCache, StorageError, Kv> {
-  return Effect.gen(function* () {
-    const kv = yield* Kv
-    const stored = yield* kv.get<unknown>(NOTEBOOK_CACHE_STORAGE_KEY)
-    return isNotebookCache(stored) ? stored : emptyNotebookCache()
-  })
+  return notebookCacheSlot.load()
 }
 
 export function saveNotebookCache(cache: NotebookCache): Effect.Effect<void, StorageError, Kv> {
-  return Effect.gen(function* () {
-    const kv = yield* Kv
-    yield* kv.set(NOTEBOOK_CACHE_STORAGE_KEY, cache)
-  })
+  return notebookCacheSlot.save(cache)
 }

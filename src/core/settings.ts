@@ -1,7 +1,8 @@
 import { Effect } from 'effect'
-import { Kv } from './fx/services'
-import type { StorageError } from './fx/errors'
 import type { NblmAccount } from './accounts/parse'
+import type { StorageError } from './fx/errors'
+import { kvSlot } from './fx/kv-slot'
+import { Kv } from './fx/services'
 import type { SiteId } from './model/types'
 
 const KEY = 'porter/settings'
@@ -66,22 +67,23 @@ export function notebookTargetPatch(
   return next
 }
 
+const settingsSlot = kvSlot<PorterSettings>(
+  KEY,
+  () => ({ ...DEFAULT_SETTINGS }),
+  (stored) => ({ ...DEFAULT_SETTINGS, ...(stored as Partial<PorterSettings>) }),
+)
+
 export function getSettings(): Effect.Effect<PorterSettings, StorageError, Kv> {
-  return Effect.gen(function* () {
-    const kv = yield* Kv
-    const stored = yield* kv.get<Partial<PorterSettings>>(KEY)
-    return { ...DEFAULT_SETTINGS, ...stored }
-  })
+  return settingsSlot.load()
 }
 
 export function updateSettings(
   patch: Partial<PorterSettings>,
 ): Effect.Effect<PorterSettings, StorageError, Kv> {
   return Effect.gen(function* () {
-    const kv = yield* Kv
     const current = yield* getSettings()
     const next: PorterSettings = { ...current, ...patch }
-    yield* kv.set(KEY, next)
+    yield* settingsSlot.save(next)
     return next
   })
 }
