@@ -52,6 +52,56 @@ type Handlers = {
   ) => Effect.Effect<PorterReply<K>, PorterError, PorterServices>
 }
 
+export type StorageDomain = 'docs' | 'watches' | 'queue' | 'settings'
+
+/** Fixed global lane-acquisition order; multi-domain work always acquires in this order so the composition stays deadlock-free. */
+export const LANE_ORDER: readonly StorageDomain[] = ['docs', 'watches', 'queue', 'settings']
+
+/**
+ * Which storage domains each message's handler MUTATES — the serialization
+ * contract background.ts derives its lanes from. Exhaustive over
+ * PorterMessage['type']: adding a message type without declaring its
+ * footprint is a compile error. Read-only handlers declare [] and run
+ * unserialized (readers may see a snapshot mid-write; all writes go through
+ * a lane).
+ */
+export const MESSAGE_DOMAINS: { [K in PorterMessage['type']]: readonly StorageDomain[] } = {
+  'porter/detect': [],
+  'porter/capture-url': ['docs'],
+  'porter/capture-page': ['docs'],
+  'porter/capture-result': ['docs'],
+  'porter/list-docs': [],
+  'porter/delete-doc': ['docs', 'watches'],
+  'porter/export': [],
+  'porter/queue-enqueue': ['queue', 'settings'],
+  'porter/queue-status': ['queue'],
+  'porter/queue-retry': ['queue'],
+  'porter/watch-create': ['watches'],
+  'porter/watch-list': ['watches'],
+  'porter/watch-remove': ['watches'],
+  // Writes the notebooks-cache (a read-modify-write on its own Kv key), but
+  // the cache is browse-only, so a lost cache update is harmless — runs unserialized.
+  'porter/list-notebooks': [],
+  'porter/create-notebook': [],
+  'porter/nblm-scan-console': [],
+  'porter/nblm-dedupe': [],
+  'porter/nblm-retry-source': [],
+  'porter/accounts-refresh': ['settings'],
+  'porter/get-settings': [],
+  'porter/update-settings': ['settings'],
+  // Remote Drive upload + local reads only; no local Kv key is mutated.
+  'porter/backup-drive': [],
+  'porter/debug-log': [],
+  'porter/debug-clear': [],
+}
+
+/** Domains for one message type, in LANE_ORDER, [] for unknown wire types. */
+export function domainsForMessage(type: string): readonly StorageDomain[] {
+  const entry = (MESSAGE_DOMAINS as Record<string, readonly StorageDomain[]>)[type]
+  if (entry === undefined) return []
+  return LANE_ORDER.filter((domain) => entry.includes(domain))
+}
+
 /**
  * Persists a freshly captured doc and records a content-free summary in the
  * debug ring — counts and kinds, never titles or bodies — so a copied log

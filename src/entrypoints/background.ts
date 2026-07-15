@@ -8,35 +8,14 @@ import { porterRuntime } from '../core/fx/runtime'
 import { isPorterMessage } from '../core/messaging'
 import { drainQueue } from '../core/queue/drain'
 import { QUEUE_ALARM } from '../core/queue/queue'
-import { handlePorterMessage } from '../core/router'
+import {
+  domainsForMessage,
+  handlePorterMessage,
+  LANE_ORDER,
+  type StorageDomain,
+} from '../core/router'
 import { resyncOneDueWatch } from '../core/watch/resync'
 import { WATCH_ALARM } from '../core/watch/watch'
-
-/** Storage domains, listed in the fixed global lane-acquisition order. */
-type SerializedDomain = 'docs' | 'watches' | 'queue'
-const LANE_ORDER: readonly SerializedDomain[] = ['docs', 'watches', 'queue']
-
-/**
- * Which storage domains a message mutates. Work spanning several domains
- * (delete-doc, and the internal watch resync) holds all their lanes, always
- * acquired in LANE_ORDER so the composition stays deadlock-free. Network-bearing
- * captures live on the `docs` lane alone, so a long transcript capture never
- * starves queue drains — which only touch the disjoint `queue` domain. Messages
- * that mutate no shared storage run unserialized.
- */
-function serializedDomainsFor(type: string): SerializedDomain[] {
-  if (type.startsWith('porter/queue-')) return ['queue']
-  if (type.startsWith('porter/watch-')) return ['watches']
-  if (
-    type === 'porter/capture-url' ||
-    type === 'porter/capture-page' ||
-    type === 'porter/capture-result'
-  ) {
-    return ['docs']
-  }
-  if (type === 'porter/delete-doc') return ['docs', 'watches']
-  return []
-}
 
 /** A promise-chain mutex over one storage domain. */
 type Lane = <A>(run: () => Promise<A>) => Promise<A>
@@ -59,13 +38,15 @@ function makeLane(): Lane {
 }
 
 export default defineBackground(() => {
-  const lanes: Record<SerializedDomain, Lane> = {
+  const lanes: Record<StorageDomain, Lane> = {
     docs: makeLane(),
     watches: makeLane(),
     queue: makeLane(),
+    settings: makeLane(),
   }
-  // Hold every needed lane, acquired outermost-first in LANE_ORDER.
-  const serialize = <A>(domains: readonly SerializedDomain[], run: () => Promise<A>): Promise<A> =>
+  // Hold every needed lane, acquired outermost-first in LANE_ORDER (see
+  // core/router.ts's MESSAGE_DOMAINS for which messages need which lanes).
+  const serialize = <A>(domains: readonly StorageDomain[], run: () => Promise<A>): Promise<A> =>
     LANE_ORDER.filter((domain) => domains.includes(domain)).reduceRight<() => Promise<A>>(
       (acc, domain) => () => lanes[domain](acc),
       run,
@@ -147,7 +128,7 @@ export default defineBackground(() => {
   browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!isPorterMessage(message)) return
     const run = () => porterRuntime.runPromise(handlePorterMessage(message))
-    const domains = serializedDomainsFor(message.type)
+    const domains = domainsForMessage(message.type)
     const messagePromise = domains.length > 0 ? serialize(domains, run) : run()
     messagePromise.then(sendResponse).catch((err: unknown) => {
       // Defects only — typed failures are flattened inside handlePorterMessage.
