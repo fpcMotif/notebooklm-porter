@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   TIER_A_COOLDOWN_MS,
   degradeForPreflightDrift,
+  degradedUntil,
   emptyTierState,
   isTierState,
   recoverAfterHealthyPreflight,
@@ -28,6 +29,15 @@ describe('Tier A degradation state', () => {
     }
 
     expect(degradeForPreflightDrift(state, 'f@example.com', 'not-a-time')).toBe(state)
+  })
+
+  it('exposes the degraded-until timestamp for a known account and undefined otherwise', () => {
+    const state = degradeForPreflightDrift(emptyTierState(), 'f@example.com', NOW)
+
+    expect(degradedUntil(state, 'f@example.com')).toBe(
+      new Date(Date.parse(NOW) + TIER_A_COOLDOWN_MS).toISOString(),
+    )
+    expect(degradedUntil(state, 'unknown@example.com')).toBeUndefined()
   })
 
   it('rejects malformed persisted state and recovers only a healthy account', () => {

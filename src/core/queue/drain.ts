@@ -14,6 +14,7 @@ import { sendIngestUnit } from '../ingest/notebooklm'
 import { fetchSession, listNotebooks, type NblmSession } from '../ingest/rpc/client'
 import {
   degradeForPreflightDrift,
+  degradedUntil,
   loadTierState,
   recoverAfterHealthyPreflight,
   routeForTierA,
@@ -251,13 +252,13 @@ export function drainQueue(
       // --- Tier routing + read-only canary (list fetched once per account) ---
       // Never route to DOM without a driver, even from persisted degraded state.
       let useDom = domAvailable && routeForTierA(tierState, job.target.accountEmail, now) === 'dom'
-      const degradedUntil = tierState.tierADegradedUntilByAccount[job.target.accountEmail]
+      const tierADegradedUntil = degradedUntil(tierState, job.target.accountEmail)
       yield* debugLog.log(
         'queue',
         'route',
         {
           tier: useDom ? 'dom' : 'rpc',
-          ...(degradedUntil !== undefined ? { tierADegradedUntil: degradedUntil } : {}),
+          ...(tierADegradedUntil !== undefined ? { tierADegradedUntil } : {}),
         },
         { run },
       )
@@ -330,7 +331,7 @@ export function drainQueue(
           } else {
             notebooks = notebooksResult.success
             notebooksByAccount.set(job.target.accountEmail, notebooks)
-            if (tierState.tierADegradedUntilByAccount[job.target.accountEmail] !== undefined) {
+            if (degradedUntil(tierState, job.target.accountEmail) !== undefined) {
               yield* debugLog.log('queue', 'tier-a recovered after healthy preflight', {}, { run })
               tierState = recoverAfterHealthyPreflight(tierState, job.target.accountEmail)
               yield* saveTierState(tierState)

@@ -31,6 +31,11 @@ export function isTierState(value: unknown): value is TierState {
   )
 }
 
+/** The persisted Tier A cooldown expiry for an account, if it is currently degraded. */
+export function degradedUntil(state: TierState, accountEmail: string): string | undefined {
+  return state.tierADegradedUntilByAccount[accountEmail]
+}
+
 /** Tier A is skipped only while an observed read-only canary remains degraded. */
 export function routeForTierA(state: TierState, accountEmail: string, now: string): 'rpc' | 'dom' {
   const until = state.tierADegradedUntilByAccount[accountEmail]
