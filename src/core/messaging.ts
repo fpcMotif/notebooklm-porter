@@ -149,3 +149,18 @@ export interface PorterClientShape {
 export class PorterClient extends Context.Service<PorterClient, PorterClientShape>()(
   'porter/PorterClient',
 ) {}
+
+/** Turns a wire-level `PorterReply` into its typed payload or a failure. */
+export function unwrapPorterReply<K extends PorterMessage['type']>(
+  reply: PorterReply<K>,
+): Effect.Effect<PorterResponseMap[K], IpcError> {
+  if (!reply.ok) {
+    return Effect.fail(new IpcError({ reason: reply.error }))
+  }
+  const { ok: _ok, ...payload } = reply
+  // Documented cast: TS can't carry the `Omit<..., 'ok'>` shape through the
+  // generic `K` back to `PorterResponseMap[K]` — this is the only remaining
+  // cast on the popup↔background wire (the transport cast in PorterClientLive
+  // is the other).
+  return Effect.succeed(payload as unknown as PorterResponseMap[K])
+}

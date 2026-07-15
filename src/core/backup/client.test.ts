@@ -2,27 +2,14 @@ import { assert, describe, it } from '@effect/vitest'
 import { Effect, Layer, Result } from 'effect'
 import { HttpStatusError } from '../fx/errors'
 import type { HttpInit } from '../fx/services'
-import { DebugLog, Http, Identity, Kv } from '../fx/services'
+import { Http } from '../fx/services'
+import { debugLogTest, identityTest, kvTest } from '../fx/testing'
 import { backupDocsToDrive } from './client'
 import type { SourceDoc } from '../model/types'
 
-const NoopDebugLog = Layer.succeed(
-  DebugLog,
-  DebugLog.of({
-    log: () => Effect.void,
-    entries: () => Effect.succeed([]),
-    clear: () => Effect.void,
-  }),
-)
+const NoopDebugLog = debugLogTest()
 
-const AuthOk = Layer.succeed(
-  Identity,
-  Identity.of({
-    redirectUrl: () => 'https://abc.chromiumapp.org/',
-    launchAuthFlow: () =>
-      Effect.succeed('https://abc.chromiumapp.org/#access_token=token-1&expires_in=3599'),
-  }),
-)
+const AuthOk = identityTest('https://abc.chromiumapp.org/#access_token=token-1&expires_in=3599')
 
 function makeDoc(overrides: Partial<SourceDoc> & Pick<SourceDoc, 'id'>): SourceDoc {
   return {
@@ -39,20 +26,10 @@ function makeDoc(overrides: Partial<SourceDoc> & Pick<SourceDoc, 'id'>): SourceD
 }
 
 function makeKvLayer(docs: SourceDoc[], driveClientId?: string) {
-  return Layer.succeed(
-    Kv,
-    Kv.of({
-      get: <T>(key: string) =>
-        Effect.succeed(
-          (key === 'porter/docs'
-            ? docs
-            : key === 'porter/settings'
-              ? { driveClientId }
-              : undefined) as T | undefined,
-        ),
-      set: () => Effect.void,
-    }),
-  )
+  return kvTest({
+    'porter/docs': docs,
+    'porter/settings': { driveClientId },
+  })
 }
 
 /** Drive's `files.list` query is a `q=` param; folder queries filter on `mimeType`. */

@@ -90,6 +90,38 @@ export interface TabsShape {
 
 export class Tabs extends Context.Service<Tabs, TabsShape>()('porter/Tabs') {}
 
+interface TabsApiTab {
+  id?: number | undefined
+  url?: string | undefined
+}
+
+interface TabsApi {
+  query: (queryInfo: { active: boolean; currentWindow: boolean }) => Promise<TabsApiTab[]>
+  sendMessage: (tabId: number, message: unknown) => Promise<unknown>
+}
+
+/** Builds a `TabsShape` around the small active-tab + relay surface we use. */
+export function makeTabs(tabs: TabsApi): TabsShape {
+  return {
+    activeTab: () =>
+      Effect.tryPromise({
+        try: async () => {
+          const [tab] = await tabs.query({ active: true, currentWindow: true })
+          return {
+            ...(tab?.id !== undefined ? { id: tab.id } : {}),
+            ...(tab?.url !== undefined ? { url: tab.url } : {}),
+          }
+        },
+        catch: (cause) => new IpcError({ reason: String(cause) }),
+      }),
+    sendMessage: (tabId, msg) =>
+      Effect.tryPromise({
+        try: () => tabs.sendMessage(tabId, msg),
+        catch: (cause) => new IpcError({ reason: String(cause) }),
+      }),
+  }
+}
+
 /** Browser-tab boundary used only by the NotebookLM visible-tab fallback. */
 export interface DomTabsShape {
   /**
