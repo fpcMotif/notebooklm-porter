@@ -8,6 +8,7 @@ import {
   X_GRAPHQL_TEE_MAX_BODY_CHARS,
   isXThreadGraphqlUrl,
 } from '../core/adapters/x/graphql'
+import { X_CONTENT_MATCHES } from '../core/adapters/x/adapter'
 
 function emit(url: string, body: string): void {
   if (body.length > X_GRAPHQL_TEE_MAX_BODY_CHARS) return
@@ -23,7 +24,7 @@ function resolvedUrl(value: string | URL): string | undefined {
 }
 
 export default defineContentScript({
-  matches: ['https://x.com/*', 'https://twitter.com/*'],
+  matches: [...X_CONTENT_MATCHES],
   world: 'MAIN',
   runAt: 'document_start',
   main() {

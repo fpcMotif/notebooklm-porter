@@ -5,8 +5,11 @@ import {
   buildCreateFolderRequest,
   buildFindFileRequest,
   buildFindFolderRequest,
+  buildFindManagedFileRequest,
+  buildFindManagedFolderRequest,
   buildUpdateFileRequest,
   docFileName,
+  sourceArtifactKey,
   parseAuthRedirect,
 } from './drive'
 
@@ -93,7 +96,10 @@ describe('buildFindFolderRequest', () => {
     expect(url.searchParams.get('q')).toBe(
       "name='NotebookLM Porter' and mimeType='application/vnd.google-apps.folder' and trashed=false",
     )
-    expect(url.searchParams.get('fields')).toBe('files(id,name)')
+    expect(url.searchParams.get('fields')).toBe(
+      'nextPageToken,incompleteSearch,files(id,name,mimeType,appProperties)',
+    )
+    expect(url.searchParams.get('pageSize')).toBe('1000')
     expect(req.body).toBeUndefined()
   })
 
@@ -127,11 +133,15 @@ describe('buildCreateFolderRequest', () => {
   it('builds a POST with folder mimeType JSON body', () => {
     const req = buildCreateFolderRequest('token-1', 'NotebookLM Porter')
     expect(req.method).toBe('POST')
-    expect(req.url).toBe('https://www.googleapis.com/drive/v3/files')
+    expect(req.url).toBe('https://www.googleapis.com/drive/v3/files?fields=id')
     expect(req.headers.Authorization).toBe('Bearer token-1')
     expect(req.headers['Content-Type']).toBe('application/json')
     expect(req.body).toBe(
-      JSON.stringify({ name: 'NotebookLM Porter', mimeType: 'application/vnd.google-apps.folder' }),
+      JSON.stringify({
+        name: 'NotebookLM Porter',
+        mimeType: 'application/vnd.google-apps.folder',
+        appProperties: { notebookLmPorterArtifact: 'backup-folder:v1' },
+      }),
     )
   })
 })
@@ -142,7 +152,7 @@ describe('buildFindFileRequest', () => {
     expect(req.method).toBe('GET')
     const url = new URL(req.url)
     expect(url.searchParams.get('q')).toBe(
-      "name='thread.md' and 'folder-abc' in parents and trashed=false",
+      "name='thread.md' and 'folder-abc' in parents and mimeType!='application/vnd.google-apps.folder' and trashed=false",
     )
   })
 
@@ -150,8 +160,43 @@ describe('buildFindFileRequest', () => {
     const req = buildFindFileRequest('token-1', "it's.md", "folder'id")
     const url = new URL(req.url)
     expect(url.searchParams.get('q')).toBe(
-      "name='it\\'s.md' and 'folder\\'id' in parents and trashed=false",
+      "name='it\\'s.md' and 'folder\\'id' in parents and mimeType!='application/vnd.google-apps.folder' and trashed=false",
     )
+  })
+})
+
+describe('managed artifact descriptors', () => {
+  it('makes a fixed-size, versioned SHA-256 key from the source id', async () => {
+    const key = await sourceArtifactKey('reddit:t3_abc')
+    expect(key).toBe('source:v1:BdkudWmp4cqiT12wgWEUx1kC-flHm2bN1z8FPtVJHQ0')
+    expect(new TextEncoder().encode(`notebookLmPorterArtifact${key}`).length).toBeLessThanOrEqual(
+      124,
+    )
+  })
+
+  it('queries a managed artifact by property, parent, and trashed state', () => {
+    const req = buildFindManagedFileRequest('token-1', 'source:v1:abc', "folder'id")
+    const url = new URL(req.url)
+    expect(url.searchParams.get('q')).toBe(
+      "appProperties has { key='notebookLmPorterArtifact' and value='source:v1:abc' } and 'folder\\'id' in parents and mimeType!='application/vnd.google-apps.folder' and trashed=false",
+    )
+    expect(url.searchParams.get('fields')).toBe(
+      'nextPageToken,incompleteSearch,files(id,name,mimeType,appProperties)',
+    )
+  })
+
+  it('queries a managed folder by its private marker', () => {
+    const req = buildFindManagedFolderRequest('token-1')
+    expect(new URL(req.url).searchParams.get('q')).toBe(
+      "appProperties has { key='notebookLmPorterArtifact' and value='backup-folder:v1' } and mimeType='application/vnd.google-apps.folder' and trashed=false",
+    )
+  })
+
+  it('appends page token without changing the base query', () => {
+    const req = buildFindManagedFileRequest('token-1', 'source:v1:abc', 'folder-1', 'next +/ token')
+    const url = new URL(req.url)
+    expect(url.searchParams.get('pageToken')).toBe('next +/ token')
+    expect(url.searchParams.get('q')).toContain("value='source:v1:abc'")
   })
 })
 
@@ -161,6 +206,7 @@ describe('buildCreateFileRequest', () => {
       name: 'thread.md',
       folderId: 'folder-abc',
       content: '# Title\n\nBody text.',
+      artifact: 'source:v1:abc',
       boundary: 'BOUNDARY123',
     })
 
@@ -169,7 +215,11 @@ describe('buildCreateFileRequest', () => {
     expect(req.headers.Authorization).toBe('Bearer token-1')
     expect(req.headers['Content-Type']).toBe('multipart/related; boundary=BOUNDARY123')
 
-    const metadata = JSON.stringify({ name: 'thread.md', parents: ['folder-abc'] })
+    const metadata = JSON.stringify({
+      name: 'thread.md',
+      parents: ['folder-abc'],
+      appProperties: { notebookLmPorterArtifact: 'source:v1:abc' },
+    })
     const expectedBody =
       `--BOUNDARY123\r\n` +
       `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
@@ -184,50 +234,78 @@ describe('buildCreateFileRequest', () => {
 })
 
 describe('buildUpdateFileRequest', () => {
-  it('builds a PATCH to the media upload endpoint with text/markdown body', () => {
-    const req = buildUpdateFileRequest('token-1', 'file-xyz', '# Updated\n\nNew body.')
+  it('builds an exact frozen multipart PATCH that atomically renames, tags, and updates content', () => {
+    const req = buildUpdateFileRequest('token-1', 'file-xyz', {
+      name: 'Updated--digest.md',
+      content: '# Updated\n\nNew body.',
+      artifact: 'source:v1:abc',
+      boundary: 'BOUNDARY123',
+    })
     expect(req.method).toBe('PATCH')
     expect(req.url).toBe(
-      'https://www.googleapis.com/upload/drive/v3/files/file-xyz?uploadType=media',
+      'https://www.googleapis.com/upload/drive/v3/files/file-xyz?uploadType=multipart',
     )
     expect(req.headers.Authorization).toBe('Bearer token-1')
-    expect(req.headers['Content-Type']).toBe('text/markdown')
-    expect(req.body).toBe('# Updated\n\nNew body.')
+    expect(req.headers['Content-Type']).toBe('multipart/related; boundary=BOUNDARY123')
+    const metadata = JSON.stringify({
+      name: 'Updated--digest.md',
+      appProperties: { notebookLmPorterArtifact: 'source:v1:abc' },
+    })
+    expect(req.body).toBe(
+      `--BOUNDARY123\r\n` +
+        `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+        `${metadata}\r\n` +
+        `--BOUNDARY123\r\n` +
+        `Content-Type: text/markdown\r\n\r\n` +
+        `# Updated\n\nNew body.\r\n` +
+        `--BOUNDARY123--`,
+    )
   })
 })
 
 describe('docFileName', () => {
   it('appends .md to a simple title', () => {
-    expect(docFileName('My Great Thread')).toBe('My Great Thread.md')
+    expect(docFileName('My Great Thread', 'source:v1:abcdefghijklmnop')).toBe(
+      'My Great Thread--abcdefghijkl.md',
+    )
   })
 
   it('replaces path separators and Windows-reserved glyphs with a hyphen', () => {
-    expect(docFileName('a/b\\c:d*e?f"g<h>i|j')).toBe('a-b-c-d-e-f-g-h-i-j.md')
+    expect(docFileName('a/b\\c:d*e?f"g<h>i|j', 'source:v1:abcdefghijklmnop')).toBe(
+      'a-b-c-d-e-f-g-h-i-j--abcdefghijkl.md',
+    )
   })
 
   it('collapses whitespace runs', () => {
-    expect(docFileName('too    many     spaces')).toBe('too many spaces.md')
+    expect(docFileName('too    many     spaces', 'source:v1:abcdefghijklmnop')).toBe(
+      'too many spaces--abcdefghijkl.md',
+    )
   })
 
   it('trims leading/trailing whitespace', () => {
-    expect(docFileName('   padded   ')).toBe('padded.md')
+    expect(docFileName('   padded   ', 'source:v1:abcdefghijklmnop')).toBe(
+      'padded--abcdefghijkl.md',
+    )
   })
 
   it('falls back to untitled for an empty title', () => {
-    expect(docFileName('')).toBe('untitled.md')
+    expect(docFileName('', 'source:v1:abcdefghijklmnop')).toBe('untitled--abcdefghijkl.md')
   })
 
   it('falls back to untitled for a whitespace-only title', () => {
-    expect(docFileName('   \t\n  ')).toBe('untitled.md')
+    expect(docFileName('   \t\n  ', 'source:v1:abcdefghijklmnop')).toBe('untitled--abcdefghijkl.md')
   })
 
   it('caps length to ~100 chars', () => {
     const longTitle = 'x'.repeat(300)
-    const result = docFileName(longTitle)
-    expect(result).toBe('x'.repeat(100) + '.md')
+    const result = docFileName(longTitle, 'source:v1:abcdefghijklmnop')
+    expect(result).toHaveLength(100)
+    expect(result).toBe('x'.repeat(83) + '--abcdefghijkl.md')
   })
 
   it('leaves emoji and unicode letters intact', () => {
-    expect(docFileName('🚀 Launch 日本語')).toBe('🚀 Launch 日本語.md')
+    expect(docFileName('🚀 Launch 日本語', 'source:v1:abcdefghijklmnop')).toBe(
+      '🚀 Launch 日本語--abcdefghijkl.md',
+    )
   })
 })

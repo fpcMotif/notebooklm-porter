@@ -1,5 +1,6 @@
 import { assert, describe, it } from '@effect/vitest'
 import { Effect, Layer } from 'effect'
+import { notebookTargetKey } from '../accounts/ownership'
 import { FetchError, HttpStatusError, ProtocolDrift } from '../fx/errors'
 import { Http, type HttpInit } from '../fx/services'
 import { alarmsTest, debugLogTest, domTabsTest, kvTest } from '../fx/testing'
@@ -7,7 +8,7 @@ import type { DomDeliveryRequest, DomDeliveryResult } from '../ingest/dom/contra
 import { TIER_STATE_STORAGE_KEY, type TierState } from '../ingest/tier-state'
 import type { IngestUnit } from '../ingest/units'
 import { RPC_IDS } from '../ingest/rpc/protocol'
-import { contentHash } from '../store/ledger'
+import { contentHash, LEDGER_STORAGE_KEY } from '../store/ledger'
 import { QUEUE_ALARM, QUEUE_STORAGE_KEY, emptyQueue, enqueueUnits } from './queue'
 import { classifyQueueFailure, drainQueue } from './drain'
 
@@ -24,6 +25,8 @@ const unit: IngestUnit = {
 }
 
 const target = { notebookId: 'nb-1', authuser: 0, accountEmail: 'f@example.com' }
+const QUEUED_JOB_ID = enqueueUnits(emptyQueue(), target, [unit], NOW).jobs[0]?.id
+if (QUEUED_JOB_ID === undefined) throw new Error('Expected queued fixture job')
 
 function addSourceResponse(): string {
   const payload = JSON.stringify({ ok: true })
@@ -38,8 +41,13 @@ function listNotebooksResponse(notebookId = 'nb-1'): string {
 }
 
 function protocolDriftResponse(): string {
-  const payload = JSON.stringify({ ok: true })
-  const frame = JSON.stringify([['wrb.fr', 'unrelatedRpc', payload]])
+  const payload = JSON.stringify([
+    [
+      ['Target notebook', null, 'nb-1'],
+      ['Malformed notebook', null, null],
+    ],
+  ])
+  const frame = JSON.stringify([['wrb.fr', RPC_IDS.listNotebooks, payload]])
   return `)]}'\n${frame.length}\n${frame}\n`
 }
 
@@ -51,7 +59,7 @@ function rpcRefusedResponse(): string {
 function runtime(
   opts: {
     accountEmail?: string
-    queue?: ReturnType<typeof emptyQueue>
+    queue?: unknown
     ledger?: Record<string, unknown>
     sessionFailure?: FetchError
     postFailure?: HttpStatusError
@@ -65,7 +73,7 @@ function runtime(
 ) {
   const values = new Map<string, unknown>([
     [QUEUE_STORAGE_KEY, opts.queue ?? enqueueUnits(emptyQueue(), target, [unit], NOW)],
-    ['porter/ledger', opts.ledger ?? {}],
+    [LEDGER_STORAGE_KEY, opts.ledger ?? {}],
     ...(opts.tierState !== undefined ? [[TIER_STATE_STORAGE_KEY, opts.tierState] as const] : []),
   ])
   const writes: Array<{ key: string; value: unknown }> = []
@@ -149,6 +157,21 @@ function queueWithInFlightJob() {
 }
 
 describe('drainQueue', () => {
+  it.effect('does no remote work for malformed persisted queue state', () =>
+    Effect.gen(function* () {
+      const fx = runtime({
+        queue: { version: 1, roundRobinCursor: 0, jobs: [{ id: 'malformed' }] },
+      })
+
+      const result = yield* drainQueue({ now: NOW }).pipe(Effect.provide(fx.layer))
+
+      assert.deepStrictEqual(result, { status: 'idle' })
+      assert.strictEqual(fx.sessionCalls(), 0)
+      assert.strictEqual(fx.listCalls(), 0)
+      assert.strictEqual(fx.posts(), 0)
+    }),
+  )
+
   it.effect('persists inFlight, receipt, then removal around a one-unit source mutation', () =>
     Effect.gen(function* () {
       const fx = runtime()
@@ -157,12 +180,12 @@ describe('drainQueue', () => {
 
       assert.deepStrictEqual(result, {
         status: 'sent',
-        jobId: 'f@example.com:nb-1:reddit:1:dbaa7975',
+        jobId: QUEUED_JOB_ID,
       })
       assert.strictEqual(fx.posts(), 1)
       assert.deepStrictEqual(
         fx.writes.map((write) => write.key),
-        [QUEUE_STORAGE_KEY, 'porter/ledger', QUEUE_STORAGE_KEY],
+        [QUEUE_STORAGE_KEY, LEDGER_STORAGE_KEY, QUEUE_STORAGE_KEY],
       )
       const firstQueue = fx.writes[0]?.value as ReturnType<typeof emptyQueue>
       const finalQueue = fx.writes[2]?.value as ReturnType<typeof emptyQueue>
@@ -192,13 +215,32 @@ describe('drainQueue', () => {
     }),
   )
 
+  it.effect('reuses one account-changed result for every job with the same binding', () =>
+    Effect.gen(function* () {
+      const unitA = { ...unit, id: 'reddit:a', docId: 'reddit:a', contentHash: contentHash('a') }
+      const unitB = { ...unit, id: 'reddit:b', docId: 'reddit:b', contentHash: contentHash('b') }
+      const queue = enqueueUnits(emptyQueue(), target, [unitA, unitB], NOW)
+      const fx = runtime({ queue, accountEmail: 'replacement@example.com' })
+
+      yield* drainQueue({ now: NOW }).pipe(Effect.provide(fx.layer))
+
+      assert.strictEqual(fx.sessionCalls(), 1)
+      assert.strictEqual(fx.posts(), 0)
+      const finalQueue = fx.values.get(QUEUE_STORAGE_KEY) as ReturnType<typeof emptyQueue>
+      assert.deepStrictEqual(
+        finalQueue.jobs.map((job) => job.status),
+        ['blocked', 'blocked'],
+      )
+    }),
+  )
+
   it.effect('removes a receipted inFlight job without sending it again after restart', () =>
     Effect.gen(function* () {
       const inFlight = queueWithInFlightJob()
       const fx = runtime({
         queue: inFlight,
         ledger: {
-          'nb-1': {
+          [notebookTargetKey(target)]: {
             'reddit:1': { contentHash: unit.contentHash, lastSynced: NOW },
           },
         },
@@ -236,7 +278,7 @@ describe('drainQueue', () => {
 
       assert.deepStrictEqual(result, {
         status: 'blocked',
-        jobId: 'f@example.com:nb-1:reddit:1:dbaa7975',
+        jobId: QUEUED_JOB_ID,
       })
       assert.strictEqual(fx.posts(), 0)
       const finalQueue = fx.values.get(QUEUE_STORAGE_KEY) as ReturnType<typeof emptyQueue>
@@ -254,7 +296,7 @@ describe('drainQueue', () => {
 
       assert.deepStrictEqual(result, {
         status: 'retrying',
-        jobId: 'f@example.com:nb-1:reddit:1:dbaa7975',
+        jobId: QUEUED_JOB_ID,
       })
       assert.strictEqual(fx.posts(), 0)
       const finalQueue = fx.values.get(QUEUE_STORAGE_KEY) as ReturnType<typeof emptyQueue>
@@ -272,7 +314,15 @@ describe('drainQueue', () => {
       const fx = runtime({
         queue: {
           ...queued,
-          jobs: [{ ...job, attempts: 4, status: 'retrying', nextAttemptAt: NOW }],
+          jobs: [
+            {
+              ...job,
+              attempts: 4,
+              status: 'retrying',
+              nextAttemptAt: NOW,
+              lastError: 'offline',
+            },
+          ],
         },
         sessionFailure: new FetchError({ url: 'https://notebooklm.google.com', cause: 'offline' }),
       })
@@ -281,7 +331,7 @@ describe('drainQueue', () => {
 
       assert.deepStrictEqual(result, {
         status: 'failed',
-        jobId: 'f@example.com:nb-1:reddit:1:dbaa7975',
+        jobId: QUEUED_JOB_ID,
       })
       const finalQueue = fx.values.get(QUEUE_STORAGE_KEY) as ReturnType<typeof emptyQueue>
       assert.strictEqual(finalQueue.jobs[0]?.status, 'failed')
@@ -298,7 +348,7 @@ describe('drainQueue', () => {
 
       assert.deepStrictEqual(result, {
         status: 'blocked',
-        jobId: 'f@example.com:nb-1:reddit:1:dbaa7975',
+        jobId: QUEUED_JOB_ID,
       })
       assert.strictEqual(fx.posts(), 0)
       const finalQueue = fx.values.get(QUEUE_STORAGE_KEY) as ReturnType<typeof emptyQueue>
@@ -319,7 +369,7 @@ describe('drainQueue', () => {
 
       assert.deepStrictEqual(result, {
         status: 'failed',
-        jobId: 'f@example.com:nb-1:reddit:1:dbaa7975',
+        jobId: QUEUED_JOB_ID,
       })
       const finalQueue = fx.values.get(QUEUE_STORAGE_KEY) as ReturnType<typeof emptyQueue>
       assert.strictEqual(finalQueue.jobs[0]?.status, 'failed')
@@ -341,7 +391,7 @@ describe('drainQueue', () => {
 
         assert.deepStrictEqual(result, {
           status: 'sent',
-          jobId: 'f@example.com:nb-1:reddit:1:dbaa7975',
+          jobId: QUEUED_JOB_ID,
         })
         assert.strictEqual(fx.posts(), 0)
         assert.strictEqual(fx.listCalls(), 1)
@@ -365,7 +415,7 @@ describe('drainQueue', () => {
 
       assert.deepStrictEqual(result, {
         status: 'uncertain',
-        jobId: 'f@example.com:nb-1:reddit:1:dbaa7975',
+        jobId: QUEUED_JOB_ID,
       })
       assert.strictEqual(fx.posts(), 1)
       assert.strictEqual(fx.domRequests.length, 0)
@@ -382,7 +432,7 @@ describe('drainQueue', () => {
 
       assert.deepStrictEqual(result, {
         status: 'failed',
-        jobId: 'f@example.com:nb-1:reddit:1:dbaa7975',
+        jobId: QUEUED_JOB_ID,
       })
       assert.strictEqual(fx.posts(), 1)
       assert.strictEqual(fx.domRequests.length, 0)
@@ -403,11 +453,11 @@ describe('drainQueue', () => {
 
       assert.deepStrictEqual(result, {
         status: 'failed',
-        jobId: 'f@example.com:nb-1:reddit:1:dbaa7975',
+        jobId: QUEUED_JOB_ID,
       })
       assert.strictEqual(fx.posts(), 0)
-      assert.strictEqual(fx.values.get('porter/ledger') !== undefined, true)
-      assert.deepStrictEqual(fx.values.get('porter/ledger'), {})
+      assert.strictEqual(fx.values.get(LEDGER_STORAGE_KEY) !== undefined, true)
+      assert.deepStrictEqual(fx.values.get(LEDGER_STORAGE_KEY), {})
       const finalQueue = fx.values.get(QUEUE_STORAGE_KEY) as ReturnType<typeof emptyQueue>
       assert.strictEqual(finalQueue.jobs[0]?.status, 'failed')
     }),
@@ -421,7 +471,7 @@ describe('drainQueue', () => {
 
       assert.deepStrictEqual(result, {
         status: 'blocked',
-        jobId: 'f@example.com:nb-1:reddit:1:dbaa7975',
+        jobId: QUEUED_JOB_ID,
       })
       // No source mutation, no dead Tier B attempt, and no account-wide cooldown.
       assert.strictEqual(fx.posts(), 0)
@@ -451,7 +501,7 @@ describe('drainQueue', () => {
 
       assert.deepStrictEqual(result, {
         status: 'uncertain',
-        jobId: 'f@example.com:nb-1:reddit:1:dbaa7975',
+        jobId: QUEUED_JOB_ID,
       })
       assert.strictEqual(fx.listCalls(), 0)
       assert.strictEqual(fx.posts(), 0)

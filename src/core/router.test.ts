@@ -1,33 +1,21 @@
 import { assert, describe, it } from '@effect/vitest'
 import { Effect, Layer } from 'effect'
 import type { DebugEntry } from './debug'
+import { alarmsTest, debugLogTest, httpTest, identityTest, kvTest, tabsTest } from './fx/testing'
+import { buildRpcUrl, homeUrl, RPC_IDS } from './ingest/rpc/protocol'
 import {
-  alarmsTest,
-  debugLogTest,
-  httpTest,
-  identityTest,
-  kvTest,
-  type RecordedHttpRequest,
-  tabsTest,
-} from './fx/testing'
-import { buildRpcUrl, createNotebookParams, homeUrl, RPC_IDS } from './ingest/rpc/protocol'
-import type { SourceDoc } from './model/types'
+  nblmSessionHtml,
+  notebookWithSources,
+  rpcResponse,
+  youtubeSourceEntry,
+} from './ingest/rpc/testing'
+import type { ThreadSourceDoc } from './model/types'
 import { domainsForMessage, handlePorterMessage, MESSAGE_DOMAINS } from './router'
 import { DEFAULT_SETTINGS } from './settings'
 
-/** Byte-count line + JSON-array-chunk line, alternating, per the real rt=c format. */
-function chunk(frames: unknown[][]): string {
-  const line = JSON.stringify(frames)
-  return `${line.length}\n${line}`
-}
-
-/** A well-formed `rt=c` batchexecute body carrying one wrb.fr frame for `rpcId`. */
-function rpcResponse(rpcId: string, payload: unknown): string {
-  return `)]}'\n${chunk([['wrb.fr', rpcId, JSON.stringify(payload)]])}\n`
-}
-
-const TARGET_SESSION_HTML =
-  '"SNlM0e":"csrf-token-1"...."FdrFJe":"fsid-1"...."oPEP7c":"f@example.com"'
+const TARGET_SESSION_HTML = nblmSessionHtml({ email: 'f@example.com' })
+const ACCOUNT = { authuser: 0, accountEmail: 'f@example.com' } as const
+const TARGET = { ...ACCOUNT, notebookId: 'nb-1' } as const
 const TARGET_LIST_URL = buildRpcUrl({
   rpcId: RPC_IDS.listNotebooks,
   authuser: 0,
@@ -42,18 +30,9 @@ function targetHttp(notebookId = 'nb-1'): Record<string, string> {
   }
 }
 
-/** A GET_NOTEBOOK web-source entry: [[id], title, metadata, [null, statusCode]]. */
-function webEntry(id: string, url: string, statusCode: number): unknown[] {
-  return [[id], id, [null, null, [100], null, 5, null, null, [url]], [null, statusCode]]
-}
-function ytEntry(id: string, url: string, statusCode: number): unknown[] {
-  return [[id], id, [null, null, null, null, 9, [url]], [null, statusCode]]
-}
-function notebookWithSources(entries: unknown[]): unknown {
-  return [['meta', entries]]
-}
-
-function makeDoc(overrides: Partial<SourceDoc> & Pick<SourceDoc, 'id' | 'capturedAt'>): SourceDoc {
+function makeDoc(
+  overrides: Partial<ThreadSourceDoc> & Pick<ThreadSourceDoc, 'id' | 'capturedAt'>,
+): ThreadSourceDoc {
   return {
     site: 'reddit',
     kind: 'thread',
@@ -68,12 +47,12 @@ function makeDoc(overrides: Partial<SourceDoc> & Pick<SourceDoc, 'id' | 'capture
 
 function testLayer(
   opts: {
-    kv?: Record<string, unknown>
+    kv?: Parameters<typeof kvTest>[0]
     debugSink?: DebugEntry[]
     tabs?: Parameters<typeof tabsTest>[0]
     alarms?: Parameters<typeof alarmsTest>[0]
     http?: Record<string, string | string[]>
-    httpRequests?: RecordedHttpRequest[]
+    requests?: Array<{ url: string; body?: string }>
   } = {},
 ) {
   return Layer.mergeAll(
@@ -81,7 +60,7 @@ function testLayer(
     debugLogTest(opts.debugSink ?? []),
     tabsTest(opts.tabs ?? {}),
     alarmsTest(opts.alarms),
-    httpTest(opts.http ?? {}, opts.httpRequests ?? []),
+    httpTest(opts.http ?? {}, opts.requests),
     identityTest(),
   )
 }
@@ -115,8 +94,8 @@ describe('handlePorterMessage', () => {
 
   it.effect('porter/list-docs returns docs sorted by capturedAt desc', () =>
     Effect.gen(function* () {
-      const docA = makeDoc({ id: 'a', capturedAt: '2026-01-01T00:00:00.000Z' })
-      const docB = makeDoc({ id: 'b', capturedAt: '2026-02-01T00:00:00.000Z' })
+      const docA = makeDoc({ id: 'reddit:a', capturedAt: '2026-01-01T00:00:00.000Z' })
+      const docB = makeDoc({ id: 'reddit:b', capturedAt: '2026-02-01T00:00:00.000Z' })
       const reply = yield* handlePorterMessage({ type: 'porter/list-docs' }).pipe(
         Effect.provide(testLayer({ kv: { 'porter/docs': [docA, docB] } })),
       )
@@ -150,92 +129,42 @@ describe('handlePorterMessage', () => {
     }),
   )
 
-  describe('porter/list-notebooks cache', () => {
-    it.effect('uses a matching-email cache only after a fresh session check', () =>
-      Effect.gen(function* () {
-        const requests: RecordedHttpRequest[] = []
-        const layer = testLayer({
-          kv: {
-            'porter/notebooks-cache/v1': {
-              version: 1,
-              entries: {
-                0: {
-                  email: 'f@example.com',
-                  notebooks: [{ id: 'cached', title: 'Cached notebook' }],
-                  refreshedAt: '2026-07-11T00:00:00.000Z',
-                },
+  it.effect('porter/list-notebooks uses its account binding without mutable settings', () =>
+    Effect.gen(function* () {
+      const reply = yield* handlePorterMessage({
+        type: 'porter/list-notebooks',
+        account: ACCOUNT,
+      }).pipe(
+        Effect.provide(
+          testLayer({
+            kv: {
+              'porter/settings': {
+                ...DEFAULT_SETTINGS,
+                nblmAuthuser: 1,
+                accounts: [{ authuser: 1, email: 'other@example.com' }],
               },
             },
-          },
-          http: { [homeUrl(0)]: TARGET_SESSION_HTML },
-          httpRequests: requests,
-        })
+            http: targetHttp(),
+          }),
+        ),
+      )
 
-        const reply = yield* handlePorterMessage({ type: 'porter/list-notebooks' }).pipe(
-          Effect.provide(layer),
-        )
-
-        assert.deepStrictEqual(reply, {
-          ok: true,
-          notebooks: [{ id: 'cached', title: 'Cached notebook' }],
-        })
-        assert.deepStrictEqual(
-          requests.map((request) => request.url),
-          [homeUrl(0)],
-        )
-      }),
-    )
-
-    it.effect('refreshes and replaces cache when forced or when the authuser email changed', () =>
-      Effect.gen(function* () {
-        const requests: RecordedHttpRequest[] = []
-        const layer = testLayer({
-          kv: {
-            'porter/notebooks-cache/v1': {
-              version: 1,
-              entries: {
-                0: {
-                  email: 'former@example.com',
-                  notebooks: [{ id: 'old', title: 'Old notebook' }],
-                  refreshedAt: '2026-07-11T00:00:00.000Z',
-                },
-              },
-            },
-          },
-          http: targetHttp('fresh'),
-          httpRequests: requests,
-        })
-
-        const mismatch = yield* handlePorterMessage({ type: 'porter/list-notebooks' }).pipe(
-          Effect.provide(layer),
-        )
-        const forced = yield* handlePorterMessage({
-          type: 'porter/list-notebooks',
-          forceRefresh: true,
-        }).pipe(Effect.provide(layer))
-        const cachedAgain = yield* handlePorterMessage({ type: 'porter/list-notebooks' }).pipe(
-          Effect.provide(layer),
-        )
-
-        assert.deepStrictEqual(mismatch, {
-          ok: true,
-          notebooks: [{ id: 'fresh', title: 'Target' }],
-        })
-        assert.deepStrictEqual(forced, { ok: true, notebooks: [{ id: 'fresh', title: 'Target' }] })
-        assert.deepStrictEqual(cachedAgain, forced)
-        assert.strictEqual(requests.filter((request) => request.url === TARGET_LIST_URL).length, 2)
-      }),
-    )
-  })
+      assert.deepStrictEqual(reply, {
+        ok: true,
+        notebooks: [{ id: 'nb-1', title: 'Target' }],
+      })
+    }),
+  )
 
   it.effect('porter/delete-doc removes only the target doc', () =>
     Effect.gen(function* () {
-      const docA = makeDoc({ id: 'a', capturedAt: '2026-01-01T00:00:00.000Z' })
-      const docB = makeDoc({ id: 'b', capturedAt: '2026-02-01T00:00:00.000Z' })
+      const docA = makeDoc({ id: 'reddit:a', capturedAt: '2026-01-01T00:00:00.000Z' })
+      const docB = makeDoc({ id: 'reddit:b', capturedAt: '2026-02-01T00:00:00.000Z' })
       const layer = testLayer({ kv: { 'porter/docs': [docA, docB] } })
-      const reply = yield* handlePorterMessage({ type: 'porter/delete-doc', docId: 'a' }).pipe(
-        Effect.provide(layer),
-      )
+      const reply = yield* handlePorterMessage({
+        type: 'porter/delete-doc',
+        docId: 'reddit:a',
+      }).pipe(Effect.provide(layer))
       assert.deepStrictEqual(reply, { ok: true })
 
       const after = yield* handlePorterMessage({ type: 'porter/list-docs' }).pipe(
@@ -272,6 +201,31 @@ describe('handlePorterMessage', () => {
   })
 
   describe('porter/capture-url (content-script adapter)', () => {
+    it.effect('rejects a same-host URL with nothing capturable before Http or Tabs', () =>
+      Effect.gen(function* () {
+        const requests: Array<{ url: string }> = []
+        let tabMessages = 0
+        const layer = testLayer({
+          requests,
+          tabs: {
+            onSendMessage: () => {
+              tabMessages += 1
+              return { ok: true, capture: {} }
+            },
+          },
+        })
+        const reply = yield* handlePorterMessage({
+          type: 'porter/capture-url',
+          url: 'https://x.com/porter',
+          tabId: 7,
+        }).pipe(Effect.provide(layer))
+
+        assert.deepStrictEqual(reply, { ok: false, error: 'Nothing capturable on this page' })
+        assert.strictEqual(tabMessages, 0)
+        assert.deepStrictEqual(requests, [])
+      }),
+    )
+
     it.effect('relays extract-thread to the tab for an X status URL and stores the doc', () =>
       Effect.gen(function* () {
         const capture = {
@@ -315,7 +269,6 @@ describe('handlePorterMessage', () => {
   })
 
   describe('porter/create-notebook', () => {
-    const HOME_HTML = '"SNlM0e":"csrf-token-1"...."FdrFJe":"fsid-1"'
     const createUrl = buildRpcUrl({
       rpcId: RPC_IDS.createNotebook,
       authuser: 0,
@@ -329,14 +282,25 @@ describe('handlePorterMessage', () => {
       sourcePath: '/',
     })
 
+    it.effect('maps an invalid title to the exact catalog message', () =>
+      Effect.gen(function* () {
+        const reply = yield* handlePorterMessage({
+          type: 'porter/create-notebook',
+          account: ACCOUNT,
+          title: '   ',
+        }).pipe(Effect.provide(testLayer()))
+
+        assert.deepStrictEqual(reply, { ok: false, error: 'Enter a notebook title' })
+      }),
+    )
+
     it.effect(
       'locates the created notebook in the re-list by the id parsed from the create reply',
       () =>
         Effect.gen(function* () {
-          const httpRequests: RecordedHttpRequest[] = []
           const layer = testLayer({
             http: {
-              [homeUrl(0)]: HOME_HTML,
+              [homeUrl(0)]: TARGET_SESSION_HTML,
               [createUrl]: rpcResponse(RPC_IDS.createNotebook, ['New Notebook', null, 'nb-2']),
               [listUrl]: [
                 rpcResponse(RPC_IDS.listNotebooks, [[['nb-1', null, 'nb-1']]]),
@@ -348,10 +312,10 @@ describe('handlePorterMessage', () => {
                 ]),
               ],
             },
-            httpRequests,
           })
           const reply = yield* handlePorterMessage({
             type: 'porter/create-notebook',
+            account: ACCOUNT,
             title: 'New Notebook',
           }).pipe(Effect.provide(layer))
           assert.deepStrictEqual(reply, {
@@ -362,223 +326,15 @@ describe('handlePorterMessage', () => {
             ],
             created: { id: 'nb-2', title: 'New Notebook' },
           })
-
-          // The create RPC's f.req envelope must carry the exact params shape,
-          // not just embed the title somewhere in the encoded body.
-          const createRequest = httpRequests.find((req) => req.url === createUrl)
-          assert.isDefined(createRequest)
-          const fReq = new URLSearchParams(createRequest?.body ?? '').get('f.req')
-          assert.isNotNull(fReq)
-          const frame = JSON.parse(fReq ?? '[]')[0]?.[0]
-          assert.strictEqual(frame?.[0], RPC_IDS.createNotebook)
-          assert.deepStrictEqual(
-            JSON.parse(frame?.[1] ?? 'null'),
-            createNotebookParams('New Notebook'),
-          )
         }),
-    )
-
-    it.effect('replaces the active account cache from the successful post-create re-list', () =>
-      Effect.gen(function* () {
-        const httpRequests: RecordedHttpRequest[] = []
-        const layer = testLayer({
-          http: {
-            [homeUrl(0)]: `${HOME_HTML}...."oPEP7c":"f@example.com"`,
-            [createUrl]: rpcResponse(RPC_IDS.createNotebook, ['New Notebook', null, 'nb-2']),
-            [listUrl]: [
-              rpcResponse(RPC_IDS.listNotebooks, [[['Existing', null, 'nb-1']]]),
-              rpcResponse(RPC_IDS.listNotebooks, [
-                [
-                  ['Existing', null, 'nb-1'],
-                  ['New Notebook', null, 'nb-2'],
-                ],
-              ]),
-            ],
-          },
-          httpRequests,
-        })
-
-        yield* handlePorterMessage({ type: 'porter/create-notebook', title: 'New Notebook' }).pipe(
-          Effect.provide(layer),
-        )
-        const cached = yield* handlePorterMessage({ type: 'porter/list-notebooks' }).pipe(
-          Effect.provide(layer),
-        )
-
-        assert.deepStrictEqual(cached, {
-          ok: true,
-          notebooks: [
-            { id: 'nb-1', title: 'Existing' },
-            { id: 'nb-2', title: 'New Notebook' },
-          ],
-        })
-        assert.strictEqual(httpRequests.filter((request) => request.url === listUrl).length, 2)
-      }),
-    )
-
-    it.effect('falls back to matching by title when the create reply has no parseable id', () =>
-      Effect.gen(function* () {
-        const layer = testLayer({
-          http: {
-            [homeUrl(0)]: HOME_HTML,
-            [createUrl]: rpcResponse(RPC_IDS.createNotebook, null),
-            [listUrl]: [
-              rpcResponse(RPC_IDS.listNotebooks, [[['Existing', null, 'nb-1']]]),
-              rpcResponse(RPC_IDS.listNotebooks, [
-                [
-                  ['Existing', null, 'nb-1'],
-                  ['New Notebook', null, 'nb-3'],
-                ],
-              ]),
-            ],
-          },
-        })
-        const reply = yield* handlePorterMessage({
-          type: 'porter/create-notebook',
-          title: 'New Notebook',
-        }).pipe(Effect.provide(layer))
-        assert.deepStrictEqual(reply, {
-          ok: true,
-          notebooks: [
-            { id: 'nb-1', title: 'Existing' },
-            { id: 'nb-3', title: 'New Notebook' },
-          ],
-          created: { id: 'nb-3', title: 'New Notebook' },
-        })
-      }),
-    )
-
-    it.effect(
-      'resolves an ambiguous title to the newly created notebook, not the pre-existing one with the same title',
-      () =>
-        Effect.gen(function* () {
-          const layer = testLayer({
-            http: {
-              [homeUrl(0)]: HOME_HTML,
-              [createUrl]: rpcResponse(RPC_IDS.createNotebook, null),
-              [listUrl]: [
-                rpcResponse(RPC_IDS.listNotebooks, [[['Notes', null, 'nb-old']]]),
-                rpcResponse(RPC_IDS.listNotebooks, [
-                  [
-                    ['Notes', null, 'nb-old'],
-                    ['Notes', null, 'nb-new'],
-                  ],
-                ]),
-              ],
-            },
-          })
-          const reply = yield* handlePorterMessage({
-            type: 'porter/create-notebook',
-            title: 'Notes',
-          }).pipe(Effect.provide(layer))
-          assert.deepStrictEqual(reply, {
-            ok: true,
-            notebooks: [
-              { id: 'nb-old', title: 'Notes' },
-              { id: 'nb-new', title: 'Notes' },
-            ],
-            created: { id: 'nb-new', title: 'Notes' },
-          })
-        }),
-    )
-
-    it.effect(
-      'ignores a parsed id that collides with a pre-existing notebook and picks the genuinely new one',
-      () =>
-        Effect.gen(function* () {
-          const layer = testLayer({
-            http: {
-              [homeUrl(0)]: HOME_HTML,
-              // Ack-style reply echoing a PRE-existing notebook's id as the hint.
-              [createUrl]: rpcResponse(RPC_IDS.createNotebook, ['Notes', null, 'nb-old']),
-              [listUrl]: [
-                rpcResponse(RPC_IDS.listNotebooks, [[['Notes', null, 'nb-old']]]),
-                rpcResponse(RPC_IDS.listNotebooks, [
-                  [
-                    ['Notes', null, 'nb-old'],
-                    ['Notes', null, 'nb-new'],
-                  ],
-                ]),
-              ],
-            },
-          })
-          const reply = yield* handlePorterMessage({
-            type: 'porter/create-notebook',
-            title: 'Notes',
-          }).pipe(Effect.provide(layer))
-          assert.deepStrictEqual(reply, {
-            ok: true,
-            notebooks: [
-              { id: 'nb-old', title: 'Notes' },
-              { id: 'nb-new', title: 'Notes' },
-            ],
-            created: { id: 'nb-new', title: 'Notes' },
-          })
-        }),
-    )
-
-    // Real timers: the handler sleeps between re-list retries, and
-    // it.effect's virtual TestClock never auto-advances, so it would hang.
-    it.live(
-      'retries the re-list when it initially still reflects the pre-create state (read-after-write lag)',
-      () =>
-        Effect.gen(function* () {
-          const layer = testLayer({
-            http: {
-              [homeUrl(0)]: HOME_HTML,
-              [createUrl]: rpcResponse(RPC_IDS.createNotebook, null),
-              [listUrl]: [
-                rpcResponse(RPC_IDS.listNotebooks, [[['Existing', null, 'nb-1']]]),
-                rpcResponse(RPC_IDS.listNotebooks, [[['Existing', null, 'nb-1']]]),
-                rpcResponse(RPC_IDS.listNotebooks, [
-                  [
-                    ['Existing', null, 'nb-1'],
-                    ['New Notebook', null, 'nb-2'],
-                  ],
-                ]),
-              ],
-            },
-          })
-          const reply = yield* handlePorterMessage({
-            type: 'porter/create-notebook',
-            title: 'New Notebook',
-          }).pipe(Effect.provide(layer))
-          assert.deepStrictEqual(reply, {
-            ok: true,
-            notebooks: [
-              { id: 'nb-1', title: 'Existing' },
-              { id: 'nb-2', title: 'New Notebook' },
-            ],
-            created: { id: 'nb-2', title: 'New Notebook' },
-          })
-        }),
-    )
-
-    // Real timers: same reason — exhausts both retries before failing.
-    it.live('surfaces protocol-drift when the created notebook cannot be located at all', () =>
-      Effect.gen(function* () {
-        const layer = testLayer({
-          http: {
-            [homeUrl(0)]: HOME_HTML,
-            [createUrl]: rpcResponse(RPC_IDS.createNotebook, null),
-            [listUrl]: rpcResponse(RPC_IDS.listNotebooks, [[['Unrelated', null, 'nb-9']]]),
-          },
-        })
-        const reply = yield* handlePorterMessage({
-          type: 'porter/create-notebook',
-          title: 'New Notebook',
-        }).pipe(Effect.provide(layer))
-        assert.strictEqual(reply.ok, false)
-        if (reply.ok) return
-        assert.match(reply.error, /protocol changed \(drift\)/)
-      }),
     )
   })
 
   describe('source console', () => {
-    const CONSOLE_SETTINGS = {
+    const CONFLICTING_SETTINGS = {
       ...DEFAULT_SETTINGS,
-      accounts: [{ authuser: 0, email: 'f@example.com' }],
+      nblmAuthuser: 1,
+      accounts: [{ authuser: 1, email: 'other@example.com' }],
     }
     const getUrl = buildRpcUrl({
       rpcId: RPC_IDS.getNotebook,
@@ -598,26 +354,25 @@ describe('handlePorterMessage', () => {
       fSid: 'fsid-1',
       sourcePath: '/notebook/nb-1',
     })
-
     it.effect('scans a notebook into sources, duplicate groups, and failed diagnoses', () =>
       Effect.gen(function* () {
         const layer = testLayer({
-          kv: { 'porter/settings': CONSOLE_SETTINGS },
+          kv: { 'porter/settings': CONFLICTING_SETTINGS },
           http: {
             [homeUrl(0)]: TARGET_SESSION_HTML,
             [getUrl]: rpcResponse(
               RPC_IDS.getNotebook,
               notebookWithSources([
-                webEntry('a', 'https://ex.com/a', 2),
-                webEntry('b', 'https://ex.com/a', 2),
-                ytEntry('bad', 'https://youtu.be/zzz', 3),
+                youtubeSourceEntry('a', 'https://youtu.be/dQw4w9WgXcQ', 2),
+                youtubeSourceEntry('b', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', 2),
+                youtubeSourceEntry('bad', 'https://youtu.be/M7lc1UVf-VE', 3),
               ]),
             ),
           },
         })
         const reply = yield* handlePorterMessage({
           type: 'porter/nblm-scan-console',
-          notebookId: 'nb-1',
+          target: TARGET,
         }).pipe(Effect.provide(layer))
         assert.isTrue(reply.ok)
         if (!reply.ok || !('scan' in reply)) return
@@ -632,97 +387,93 @@ describe('handlePorterMessage', () => {
       }),
     )
 
-    it.effect('auto-removes duplicate sources, then re-scans a clean notebook', () =>
+    it.effect('maps duplicate removal to its scan and removed IDs reply', () =>
       Effect.gen(function* () {
-        const httpRequests: RecordedHttpRequest[] = []
         const layer = testLayer({
-          kv: { 'porter/settings': CONSOLE_SETTINGS },
+          kv: { 'porter/settings': CONFLICTING_SETTINGS },
           http: {
             [homeUrl(0)]: TARGET_SESSION_HTML,
             [getUrl]: [
               rpcResponse(
                 RPC_IDS.getNotebook,
                 notebookWithSources([
-                  webEntry('a', 'https://ex.com/a', 2),
-                  webEntry('b', 'https://ex.com/a', 2),
+                  youtubeSourceEntry('a', 'https://youtu.be/dQw4w9WgXcQ', 2),
+                  youtubeSourceEntry('b', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', 2),
                 ]),
               ),
               rpcResponse(
                 RPC_IDS.getNotebook,
-                notebookWithSources([webEntry('a', 'https://ex.com/a', 2)]),
+                notebookWithSources([youtubeSourceEntry('a', 'https://youtu.be/dQw4w9WgXcQ', 2)]),
               ),
             ],
             [deleteUrl]: rpcResponse(RPC_IDS.deleteSource, null),
           },
-          httpRequests,
         })
+
         const reply = yield* handlePorterMessage({
           type: 'porter/nblm-dedupe',
-          notebookId: 'nb-1',
+          target: TARGET,
         }).pipe(Effect.provide(layer))
+
         assert.isTrue(reply.ok)
         if (!reply.ok || !('removedIds' in reply)) return
         assert.deepStrictEqual(reply.removedIds, ['b'])
         assert.strictEqual(reply.scan.duplicateCount, 0)
-        assert.strictEqual(reply.scan.sources.length, 1)
-
-        // The delete carried the removed source id in its f.req envelope.
-        const del = httpRequests.find((req) => req.url === deleteUrl)
-        const fReq = new URLSearchParams(del?.body ?? '').get('f.req')
-        const frame = JSON.parse(fReq ?? '[]')[0]?.[0]
-        assert.strictEqual(frame?.[0], RPC_IDS.deleteSource)
-        assert.deepStrictEqual(JSON.parse(frame?.[1] ?? 'null'), [[['b']]])
       }),
     )
 
-    it.effect('retries one failed source and returns the re-scanned notebook', () =>
+    it.effect('maps source retry to its fresh scan reply', () =>
       Effect.gen(function* () {
-        const httpRequests: RecordedHttpRequest[] = []
         const layer = testLayer({
-          kv: { 'porter/settings': CONSOLE_SETTINGS },
+          kv: { 'porter/settings': CONFLICTING_SETTINGS },
           http: {
             [homeUrl(0)]: TARGET_SESSION_HTML,
             [refreshUrl]: rpcResponse(RPC_IDS.refreshSource, null),
-            [getUrl]: rpcResponse(
-              RPC_IDS.getNotebook,
-              notebookWithSources([ytEntry('bad', 'https://youtu.be/zzz', 1)]),
-            ),
+            [getUrl]: [
+              rpcResponse(
+                RPC_IDS.getNotebook,
+                notebookWithSources([youtubeSourceEntry('bad', 'https://youtu.be/zzz', 3)]),
+              ),
+              rpcResponse(
+                RPC_IDS.getNotebook,
+                notebookWithSources([youtubeSourceEntry('bad', 'https://youtu.be/zzz', 1)]),
+              ),
+            ],
           },
-          httpRequests,
         })
+
         const reply = yield* handlePorterMessage({
           type: 'porter/nblm-retry-source',
-          notebookId: 'nb-1',
+          target: TARGET,
           sourceId: 'bad',
         }).pipe(Effect.provide(layer))
+
         assert.isTrue(reply.ok)
         if (!reply.ok || !('scan' in reply)) return
         assert.strictEqual(reply.scan.sources[0]?.status, 'processing')
-
-        const refresh = httpRequests.find((req) => req.url === refreshUrl)
-        const fReq = new URLSearchParams(refresh?.body ?? '').get('f.req')
-        const frame = JSON.parse(fReq ?? '[]')[0]?.[0]
-        assert.deepStrictEqual(JSON.parse(frame?.[1] ?? 'null'), [null, ['bad'], [2]])
       }),
     )
 
     it.effect('surfaces NotLoggedIn when the signed-in email does not match the account', () =>
       Effect.gen(function* () {
         const layer = testLayer({
-          kv: { 'porter/settings': CONSOLE_SETTINGS },
+          kv: { 'porter/settings': CONFLICTING_SETTINGS },
           http: { [homeUrl(0)]: '"SNlM0e":"csrf-token-1"...."oPEP7c":"other@example.com"' },
         })
         const reply = yield* handlePorterMessage({
           type: 'porter/nblm-scan-console',
-          notebookId: 'nb-1',
+          target: TARGET,
         }).pipe(Effect.provide(layer))
-        assert.strictEqual(reply.ok, false)
+        assert.deepStrictEqual(reply, {
+          ok: false,
+          error: 'Not signed in to notebooklm.google.com for account 0 — open it and sign in',
+        })
       }),
     )
   })
 
   describe('queue messages', () => {
-    it.effect('queues planned units under the active account and arms the durable alarm', () =>
+    it.effect('queues planned units under the bound target and arms the durable alarm', () =>
       Effect.gen(function* () {
         const doc = makeDoc({ id: 'reddit:queued', capturedAt: '2026-07-11T00:00:00.000Z' })
         const scheduled: Array<{ name: string; when: number }> = []
@@ -741,7 +492,7 @@ describe('handlePorterMessage', () => {
         const reply = yield* handlePorterMessage({
           type: 'porter/queue-enqueue',
           docIds: [doc.id],
-          notebookId: 'nb-1',
+          target: TARGET,
         }).pipe(Effect.provide(layer))
         assert.isTrue(reply.ok)
         if (!reply.ok || !('queue' in reply)) return
@@ -751,6 +502,14 @@ describe('handlePorterMessage', () => {
         )
         assert.strictEqual(scheduled[0]?.name, 'porter/ingest-queue')
 
+        const settings = yield* handlePorterMessage({ type: 'porter/get-settings' }).pipe(
+          Effect.provide(layer),
+        )
+        assert.isTrue(settings.ok)
+        if (settings.ok && 'settings' in settings) {
+          assert.strictEqual(settings.settings.notebookTargets.reddit, 'nb-1')
+        }
+
         const status = yield* handlePorterMessage({ type: 'porter/queue-status' }).pipe(
           Effect.provide(layer),
         )
@@ -758,7 +517,7 @@ describe('handlePorterMessage', () => {
       }),
     )
 
-    it.effect('refuses a notebook id that is absent from the fresh account listing', () =>
+    it.effect('refuses a Notebook target absent from the fresh account listing', () =>
       Effect.gen(function* () {
         const doc = makeDoc({ id: 'reddit:queued', capturedAt: '2026-07-11T00:00:00.000Z' })
         const layer = testLayer({
@@ -775,13 +534,74 @@ describe('handlePorterMessage', () => {
         const reply = yield* handlePorterMessage({
           type: 'porter/queue-enqueue',
           docIds: [doc.id],
-          notebookId: 'nb-not-allowed',
+          target: { ...TARGET, notebookId: 'nb-not-allowed' },
         }).pipe(Effect.provide(layer))
 
         assert.deepStrictEqual(reply, {
           ok: false,
           error: 'Choose a notebook from the current account',
         })
+      }),
+    )
+
+    it.effect('keeps a queued target bound when the mutable account selection has changed', () =>
+      Effect.gen(function* () {
+        const doc = makeDoc({ id: 'reddit:bound', capturedAt: '2026-07-11T00:00:00.000Z' })
+        const changedSettings = {
+          ...DEFAULT_SETTINGS,
+          nblmAuthuser: 1,
+          accounts: [{ authuser: 1, email: 'other@example.com' }],
+          notebookTargets: { reddit: 'nb-old' },
+        }
+        const layer = testLayer({
+          kv: {
+            'porter/docs': [doc],
+            'porter/settings': changedSettings,
+          },
+          http: targetHttp(),
+        })
+
+        const reply = yield* handlePorterMessage({
+          type: 'porter/queue-enqueue',
+          docIds: [doc.id],
+          target: TARGET,
+        }).pipe(Effect.provide(layer))
+
+        assert.isTrue(reply.ok)
+        if (!reply.ok || !('queue' in reply)) return
+        assert.match(reply.queue.jobs[0]?.id ?? '', /^\["queue-delivery:v2",/)
+
+        const settings = yield* handlePorterMessage({ type: 'porter/get-settings' }).pipe(
+          Effect.provide(layer),
+        )
+        assert.deepStrictEqual(settings, { ok: true, settings: changedSettings })
+      }),
+    )
+
+    it.effect('rejects a queued target when its authuser now names another email', () =>
+      Effect.gen(function* () {
+        const doc = makeDoc({ id: 'reddit:queued', capturedAt: '2026-07-11T00:00:00.000Z' })
+        const layer = testLayer({
+          kv: { 'porter/docs': [doc] },
+          http: {
+            [homeUrl(0)]: nblmSessionHtml({ email: 'different@example.com' }),
+          },
+        })
+
+        const reply = yield* handlePorterMessage({
+          type: 'porter/queue-enqueue',
+          docIds: [doc.id],
+          target: TARGET,
+        }).pipe(Effect.provide(layer))
+
+        assert.deepStrictEqual(reply, {
+          ok: false,
+          error: 'Not signed in to notebooklm.google.com for account 0 — open it and sign in',
+        })
+        const status = yield* handlePorterMessage({ type: 'porter/queue-status' }).pipe(
+          Effect.provide(layer),
+        )
+        assert.deepStrictEqual(status, { ok: true, queue: { jobs: [] } })
       }),
     )
   })
@@ -796,14 +616,19 @@ describe('handlePorterMessage', () => {
           capturedAt: '2026-07-11T00:00:00.000Z',
         })
         const scheduled: Array<{ name: string; when: number }> = []
-        const layer = testLayer({
-          kv: {
-            'porter/docs': [doc],
-            'porter/settings': {
+        const store = new Map<string, unknown>([
+          ['porter/docs', [doc]],
+          [
+            'porter/settings',
+            {
               ...DEFAULT_SETTINGS,
-              accounts: [{ authuser: 0, email: 'f@example.com' }],
+              nblmAuthuser: 1,
+              accounts: [{ authuser: 1, email: 'other@example.com' }],
             },
-          },
+          ],
+        ])
+        const layer = testLayer({
+          kv: store,
           http: targetHttp(),
           alarms: { onSchedule: (name, when) => scheduled.push({ name, when }) },
         })
@@ -811,13 +636,17 @@ describe('handlePorterMessage', () => {
         const created = yield* handlePorterMessage({
           type: 'porter/watch-create',
           docId: doc.id,
-          notebookId: 'nb-1',
+          target: TARGET,
         }).pipe(Effect.provide(layer))
         assert.isTrue(created.ok)
         if (!created.ok || !('watches' in created)) return
         assert.strictEqual(created.watches.length, 1)
         assert.strictEqual(created.watches[0]?.sourceDocId, doc.id)
         assert.strictEqual(scheduled[0]?.name, 'porter/watch-resync')
+        const persisted = store.get('porter/watch/v1') as
+          | { readonly watches?: readonly { readonly target?: unknown }[] }
+          | undefined
+        assert.deepStrictEqual(persisted?.watches?.[0]?.target, TARGET)
 
         const listed = yield* handlePorterMessage({ type: 'porter/watch-list' }).pipe(
           Effect.provide(layer),
@@ -856,7 +685,7 @@ describe('handlePorterMessage', () => {
         const reply = yield* handlePorterMessage({
           type: 'porter/watch-create',
           docId: doc.id,
-          notebookId: 'nb-1',
+          target: TARGET,
         }).pipe(Effect.provide(layer))
 
         assert.deepStrictEqual(reply, {
@@ -887,7 +716,7 @@ describe('handlePorterMessage', () => {
         const created = yield* handlePorterMessage({
           type: 'porter/watch-create',
           docId: doc.id,
-          notebookId: 'nb-1',
+          target: TARGET,
         }).pipe(Effect.provide(layer))
         assert.isTrue(created.ok)
 
@@ -930,9 +759,10 @@ describe('handlePorterMessage', () => {
   it.effect('flattens NotLoggedIn into the same friendly string background.ts produces today', () =>
     Effect.gen(function* () {
       const layer = testLayer({ http: { [homeUrl(0)]: '<html>signed out</html>' } })
-      const reply = yield* handlePorterMessage({ type: 'porter/list-notebooks' }).pipe(
-        Effect.provide(layer),
-      )
+      const reply = yield* handlePorterMessage({
+        type: 'porter/list-notebooks',
+        account: ACCOUNT,
+      }).pipe(Effect.provide(layer))
       assert.deepStrictEqual(reply, {
         ok: false,
         error: 'Not signed in to notebooklm.google.com for account 0 — open it and sign in',

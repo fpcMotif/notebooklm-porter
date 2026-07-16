@@ -8,8 +8,9 @@ export const hackernewsAdapter: SourceAdapter = {
   detect(url: string): Capturable | null {
     const u = safeUrl(url)
     if (!u) return null
-    if (u.pathname === '/item' && u.searchParams.get('id')) {
-      return { kind: 'thread', label: 'Capture this discussion' }
+    const itemId = u.pathname === '/item' ? u.searchParams.get('id') : null
+    if (itemId) {
+      return { identity: itemId, kind: 'thread', label: 'Capture this discussion' }
     }
     return null
   },

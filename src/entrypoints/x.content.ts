@@ -14,13 +14,8 @@ import {
   type RawTweet,
   type TweetTextNode,
 } from '../core/adapters/x/extract'
-import {
-  X_GRAPHQL_TEE_EVENT,
-  isGraphqlTeeEventDetail,
-  preferCompleteGraphqlThread,
-  tweetsForStatus,
-  tweetsFromGraphql,
-} from '../core/adapters/x/graphql'
+import { X_CONTENT_MATCHES } from '../core/adapters/x/adapter'
+import { X_GRAPHQL_TEE_EVENT, createXThreadEvidence } from '../core/adapters/x/graphql'
 import { hasMessageType } from '../core/messaging'
 import type { ExtractResponse } from '../core/messaging'
 
@@ -43,38 +38,20 @@ const SCROLL_STEP_PX = 1600
 const SCROLL_WAIT_MS = 350
 const MAX_SCROLL_STEPS = 25
 const STALL_LIMIT = 3
-const MAX_OBSERVED_GRAPHQL_TWEETS = 1000
 
-const observedGraphqlTweets = new Map<string, RawTweet>()
-
-function storeGraphqlTweet(tweet: RawTweet): void {
-  const existing = observedGraphqlTweets.get(tweet.id)
-  if (existing !== undefined && existing.text.length >= tweet.text.length) return
-  if (existing === undefined && observedGraphqlTweets.size >= MAX_OBSERVED_GRAPHQL_TWEETS) {
-    const oldestId = observedGraphqlTweets.keys().next().value
-    if (oldestId !== undefined) observedGraphqlTweets.delete(oldestId)
-  }
-  observedGraphqlTweets.set(tweet.id, tweet)
-}
+const threadEvidence = createXThreadEvidence()
 
 function eventDetail(value: unknown): unknown {
   return typeof value === 'object' && value !== null && 'detail' in value ? value.detail : undefined
 }
 
 function receiveGraphqlResponse(event: Event): void {
-  const detail = eventDetail(event)
-  if (!isGraphqlTeeEventDetail(detail)) return
-  try {
-    const payload = JSON.parse(detail.body) as unknown
-    for (const tweet of tweetsFromGraphql(payload)) storeGraphqlTweet(tweet)
-  } catch {
-    // A malformed page event is indistinguishable from a transient X change.
-    // DOM capture remains the floor, so ignore it rather than failing capture.
-  }
+  threadEvidence.observe(eventDetail(event))
 }
 
 export default defineContentScript({
-  matches: ['https://x.com/*', 'https://twitter.com/*'],
+  matches: [...X_CONTENT_MATCHES],
+  runAt: 'document_start',
   main() {
     document.addEventListener(X_GRAPHQL_TEE_EVENT, receiveGraphqlResponse)
     browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -99,8 +76,7 @@ async function extractThread(): Promise<ExtractResponse> {
   if (!drained.ok) {
     return { ok: false, error: drained.error }
   }
-  const graphTweets = tweetsForStatus([...observedGraphqlTweets.values()], parts.statusId)
-  const tweets = preferCompleteGraphqlThread(graphTweets, drained.tweets)
+  const tweets = threadEvidence.resolve(parts.statusId, drained.tweets)
   const { truncated } = drained
   if (tweets.length === 0) {
     return { ok: false, error: 'No tweets found on this page after scrolling' }

@@ -211,6 +211,20 @@ describe('formatCapture — playlist', () => {
     expect(JSON.parse(lines[1] ?? '{}')).toMatchObject({ videoId: 'v2', index: 2 })
   })
 
+  it('stores an independent typed playlist inventory', () => {
+    const videos = [
+      { videoId: 'v1', url: 'https://www.youtube.com/watch?v=v1', title: 'One', index: 1 },
+    ]
+    const doc = formatCapture(playlistCapture({ videos }), undefined, FIXED_NOW)
+
+    if (doc.kind !== 'playlist') throw new Error('expected playlist')
+    expect(doc.playlistVideos).toEqual(videos)
+    expect(doc.playlistVideos).not.toBe(videos)
+    expect(doc.playlistVideos[0]).not.toBe(videos[0])
+    videos[0]!.title = 'Mutated after capture'
+    expect(doc.playlistVideos[0]?.title).toBe('One')
+  })
+
   it('markdown contains the ToC table (not per-video sources)', () => {
     const doc = formatCapture(playlistCapture(), undefined, FIXED_NOW)
     expect(doc.markdown).toContain('| # | Title | Channel | Duration | Captions |')
@@ -229,6 +243,10 @@ describe('formatCapture — playlist', () => {
     const doc = formatCapture(playlistCapture({ transcriptDocs }), undefined, FIXED_NOW)
 
     expect(doc.videoDocs).toEqual(transcriptDocs)
+    expect(doc.videoDocs).not.toBe(transcriptDocs)
+    expect(doc.videoDocs?.[0]).not.toBe(transcriptDocs[0])
+    transcriptDocs[0]!.markdown = 'Mutated after capture'
+    expect(doc.videoDocs?.[0]?.markdown).toBe('# Video one\n\nTranscript')
     expect(doc.markdown).toContain('| 1 | Video one |')
   })
 

@@ -1,12 +1,13 @@
 import { Effect, Result } from 'effect'
+import type { NotebookTarget } from '../accounts/ownership'
 import type {
   FetchError,
   HttpStatusError,
-  NotLoggedIn,
   ProtocolDrift,
   RpcRefused,
   StorageError,
 } from '../fx/errors'
+import { NotLoggedIn } from '../fx/errors'
 import { DebugLog, Http, Kv } from '../fx/services'
 import { listDocs } from '../store'
 import { diffAgainstLedger, loadLedger, recordSynced, saveLedger } from '../store/ledger'
@@ -97,6 +98,14 @@ export function ingestIntoNotebook(
     // toFriendlyError (NotLoggedIn, ProtocolDrift, etc.) can map them —
     // only per-unit RPC failures below get stringified into IngestOutcome.
     const session = yield* fetchSession(authuser)
+    if (session.email === undefined) {
+      return yield* Effect.fail(new NotLoggedIn({ authuser }))
+    }
+    const target: NotebookTarget = {
+      authuser,
+      accountEmail: session.email,
+      notebookId: opts.notebookId,
+    }
     const docs = yield* listDocs()
     const byId = new Map(docs.map((doc) => [doc.id, doc]))
     let ledger = yield* loadLedger()
@@ -116,7 +125,7 @@ export function ingestIntoNotebook(
         continue
       }
       for (const unit of planIngestUnits(doc)) {
-        const diff = diffAgainstLedger(ledger, opts.notebookId, [unit])
+        const diff = diffAgainstLedger(ledger, target, [unit])
         if (diff.unchanged.length > 0) {
           outcomes.push({
             docId: unit.docId,
@@ -135,7 +144,7 @@ export function ingestIntoNotebook(
         outcomes.push(outcome)
         if (!outcome.ok) continue
 
-        ledger = recordSynced(ledger, opts.notebookId, [
+        ledger = recordSynced(ledger, target, [
           { id: unit.id, contentHash: unit.contentHash, now: new Date().toISOString() },
         ])
         yield* saveLedger(ledger)

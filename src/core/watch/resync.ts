@@ -1,5 +1,6 @@
 import { Effect, Result } from 'effect'
-import { adapterForUrl } from '../adapters/registry'
+import { captureResolvedUrl, isResolvedUrlCapturable } from '../adapters/capture'
+import { resolveCapturable } from '../adapters/registry'
 import type { AlarmError, StorageError } from '../fx/errors'
 import { Alarms, DebugLog, Http, Kv } from '../fx/services'
 import { formatCapture } from '../format/format'
@@ -67,12 +68,8 @@ export function resyncOneDueWatch(
       { run },
     )
 
-    const adapter = adapterForUrl(watch.sourceUrl)
-    if (
-      adapter === undefined ||
-      adapter.strategy.mode !== 'url' ||
-      adapter.detect(watch.sourceUrl) === null
-    ) {
+    const resolved = resolveCapturable(watch.sourceUrl)
+    if (resolved === undefined || !isResolvedUrlCapturable(resolved)) {
       const disabled = disableWatch(
         watches,
         watch.id,
@@ -82,7 +79,7 @@ export function resyncOneDueWatch(
       yield* debugLog.log(
         'watch',
         'disabled: adapter unsupported',
-        { adapterId: adapter?.id ?? 'none' },
+        { adapterId: resolved?.adapter.id ?? 'none' },
         { run, level: 'warn' },
       )
       yield* saveWatches(disabled)
@@ -90,15 +87,13 @@ export function resyncOneDueWatch(
       return { status: 'disabled', watchId: watch.id }
     }
 
-    const captured = yield* Effect.result(
-      adapter.strategy.capture(watch.sourceUrl, watch.captureOptions),
-    )
+    const captured = yield* Effect.result(captureResolvedUrl(resolved, watch.captureOptions))
     if (Result.isFailure(captured)) {
       const failed = rescheduleWatchFailure(watches, watch.id, 'Could not recapture source', now)
       yield* debugLog.log(
         'watch',
         'recapture failed',
-        { adapterId: adapter.id, error: String(captured.failure) },
+        { adapterId: resolved.adapter.id, error: String(captured.failure) },
         { run, level: 'warn' },
       )
       yield* saveWatches(failed)
@@ -132,7 +127,7 @@ export function resyncOneDueWatch(
     // doesn't already have unchanged are worth enqueueing.
     const withoutSuperseded = supersedePendingUnitVersions(queue, watch.target, units)
     const ledger = yield* loadLedger()
-    const { pending, synced } = partitionSynced(ledger, watch.target.notebookId, units)
+    const { pending, synced } = partitionSynced(ledger, watch.target, units)
     const nextQueue = enqueueUnits(withoutSuperseded, watch.target, pending, now)
     yield* saveQueue(nextQueue)
 

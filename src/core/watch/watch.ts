@@ -1,5 +1,5 @@
+import { notebookTargetKey, type NotebookTarget } from '../accounts/ownership'
 import type { CaptureOptions } from '../adapters/types'
-import type { QueueTarget } from '../queue/queue'
 
 export const WATCH_INTERVAL_MS = 6 * 60 * 60 * 1_000
 export const WATCH_ALARM = 'porter/watch-resync'
@@ -12,7 +12,7 @@ export interface Watch {
   id: string
   sourceDocId: string
   sourceUrl: string
-  target: QueueTarget
+  target: NotebookTarget
   /** Preserve the user's explicit transcript-capture choice on every run. */
   captureOptions?: CaptureOptions
   intervalMs: number
@@ -32,7 +32,8 @@ export interface WatchState {
 export interface WatchView {
   id: string
   sourceDocId: string
-  notebookId: string
+  /** Detached durable target; the popup must not infer its account from current selection. */
+  target: NotebookTarget
   status: WatchStatus
   nextRunAt: string
   lastResyncedAt?: string
@@ -42,7 +43,7 @@ export interface WatchView {
 export interface CreateWatchInput {
   sourceDocId: string
   sourceUrl: string
-  target: QueueTarget
+  target: NotebookTarget
   captureOptions?: CaptureOptions
   now: string
   intervalMs?: number
@@ -53,8 +54,8 @@ function nextRunAt(now: string, intervalMs: number): string {
 }
 
 /** Stable per source + account + notebook; a re-enable updates this binding. */
-export function watchId(sourceDocId: string, target: QueueTarget): string {
-  return [sourceDocId, target.accountEmail, target.notebookId].join(':')
+export function watchId(sourceDocId: string, target: NotebookTarget): string {
+  return JSON.stringify(['watch:v2', sourceDocId, notebookTargetKey(target)])
 }
 
 export function emptyWatches(): WatchState {
@@ -71,7 +72,9 @@ export function upsertWatch(state: WatchState, input: CreateWatchInput): WatchSt
     sourceDocId: input.sourceDocId,
     sourceUrl: input.sourceUrl,
     target: { ...input.target },
-    ...(input.captureOptions !== undefined ? { captureOptions: input.captureOptions } : {}),
+    ...(input.captureOptions?.enrichTranscripts === true
+      ? { captureOptions: { enrichTranscripts: true as const } }
+      : {}),
     intervalMs,
     status: 'active',
     nextRunAt: nextRunAt(input.now, intervalMs),
@@ -169,7 +172,7 @@ export function watchSnapshot(state: WatchState): WatchView[] {
   return state.watches.map((watch) => ({
     id: watch.id,
     sourceDocId: watch.sourceDocId,
-    notebookId: watch.target.notebookId,
+    target: { ...watch.target },
     status: watch.status,
     nextRunAt: watch.nextRunAt,
     ...(watch.lastResyncedAt !== undefined ? { lastResyncedAt: watch.lastResyncedAt } : {}),

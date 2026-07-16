@@ -59,6 +59,15 @@ export class IpcError extends Data.TaggedError('IpcError')<{
   reason: string
 }> {}
 
+export class NotebookCreationUncertain extends Data.TaggedError('NotebookCreationUncertain')<{
+  authuser: number
+  stage: 'create-request' | 'post-create-list' | 'created-notebook'
+  reason: 'network' | 'http-status' | 'protocol-drift' | 'rpc-refused' | 'missing-id'
+  status?: number
+}> {}
+
+export class NotebookTitleInvalid extends Data.TaggedError('NotebookTitleInvalid')<{}> {}
+
 export type PorterError =
   | FetchError
   | HttpStatusError
@@ -71,3 +80,5 @@ export type PorterError =
   | ExtractionError
   | AlarmError
   | IpcError
+  | NotebookCreationUncertain
+  | NotebookTitleInvalid

@@ -10,25 +10,60 @@ export interface TierState {
   tierADegradedUntilByAccount: Record<string, string>
 }
 
+type UnknownRecord = Record<string, unknown>
+
+function isPlainRecord(value: unknown): value is UnknownRecord {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+function isCanonicalIsoTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  const milliseconds = Date.parse(value)
+  if (!Number.isFinite(milliseconds)) return false
+  try {
+    return new Date(milliseconds).toISOString() === value
+  } catch {
+    return false
+  }
+}
+
 export function emptyTierState(): TierState {
   return { version: 1, tierADegradedUntilByAccount: {} }
 }
 
-export function isTierState(value: unknown): value is TierState {
+/**
+ * Decode the short-lived Tier A circuit breaker. Stored state cannot extend
+ * the DOM fallback beyond one fresh cooldown window.
+ */
+export function decodeStoredTierState(value: unknown, nowMs: number): TierState {
   if (
-    typeof value !== 'object' ||
-    value === null ||
-    !('version' in value) ||
+    !Number.isFinite(nowMs) ||
+    !isPlainRecord(value) ||
+    !Object.hasOwn(value, 'version') ||
     value.version !== 1 ||
-    !('tierADegradedUntilByAccount' in value) ||
-    typeof value.tierADegradedUntilByAccount !== 'object' ||
-    value.tierADegradedUntilByAccount === null
+    !Object.hasOwn(value, 'tierADegradedUntilByAccount') ||
+    !isPlainRecord(value.tierADegradedUntilByAccount)
   ) {
-    return false
+    return emptyTierState()
   }
-  return Object.values(value.tierADegradedUntilByAccount).every(
-    (until) => typeof until === 'string',
-  )
+
+  const tierADegradedUntilByAccount: Record<string, string> = {}
+  const latestAllowedMs = nowMs + TIER_A_COOLDOWN_MS
+  for (const [accountEmail, until] of Object.entries(value.tierADegradedUntilByAccount)) {
+    if (accountEmail.trim() === '' || !isCanonicalIsoTimestamp(until)) continue
+    const untilMs = Date.parse(until)
+    if (untilMs <= nowMs || untilMs > latestAllowedMs) continue
+    Object.defineProperty(tierADegradedUntilByAccount, accountEmail, {
+      value: until,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    })
+  }
+
+  return { version: 1, tierADegradedUntilByAccount }
 }
 
 /** Tier A is skipped only while an observed read-only canary remains degraded. */
@@ -62,11 +97,11 @@ export function recoverAfterHealthyPreflight(state: TierState, accountEmail: str
   return { ...state, tierADegradedUntilByAccount }
 }
 
-export function loadTierState(): Effect.Effect<TierState, StorageError, Kv> {
+export function loadTierState(nowMs = Date.now()): Effect.Effect<TierState, StorageError, Kv> {
   return Effect.gen(function* () {
     const kv = yield* Kv
     const stored = yield* kv.get<unknown>(TIER_STATE_STORAGE_KEY)
-    return isTierState(stored) ? stored : emptyTierState()
+    return decodeStoredTierState(stored, nowMs)
   })
 }
 

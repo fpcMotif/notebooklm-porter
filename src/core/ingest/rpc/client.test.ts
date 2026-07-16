@@ -9,7 +9,7 @@ import {
   RpcRefused,
 } from '../../fx/errors'
 import { debugLogTest, httpHandlerTest } from '../../fx/testing'
-import { addTextSource, createNotebook, fetchSession, rpcCall } from './client'
+import { addTextSource, createNotebook, deleteSource, fetchSession, rpcCall } from './client'
 import { RPC_IDS } from './protocol'
 
 const NoopDebugLive = debugLogTest()
@@ -154,7 +154,7 @@ describe('rpcCall', () => {
       if (Result.isFailure(result)) {
         assert.instanceOf(result.failure, RpcRefused)
         assert.strictEqual(result.failure.rpcId, RPC_IDS.addSource)
-        assert.strictEqual(result.failure.code, '"QUOTA_EXCEEDED"')
+        assert.strictEqual(result.failure.code, 'QUOTA_EXCEEDED')
       }
     }),
   )
@@ -168,6 +168,29 @@ describe('rpcCall', () => {
       )
       const result = yield* rpcCall(RPC_IDS.addSource, {}, session, 0).pipe(Effect.provide(layer))
       assert.isNull(result)
+    }),
+  )
+
+  it.effect('never logs a raw title from a malformed create response', () =>
+    Effect.gen(function* () {
+      const title = 'Private notebook title'
+      const text = `)]}'\n${chunk([
+        ['wrb.fr', 'unrelatedRpc', JSON.stringify([title, null, 'nb-1'])],
+      ])}\n`
+      const logs: Parameters<typeof debugLogTest>[0] = []
+      const layer = Layer.mergeAll(
+        httpHandlerTest(() => Effect.succeed(text)),
+        debugLogTest(logs),
+      )
+
+      const result = yield* Effect.result(
+        createNotebook(title, session, 0).pipe(Effect.provide(layer)),
+      )
+
+      assert.isTrue(Result.isFailure(result))
+      if (Result.isFailure(result)) assert.instanceOf(result.failure, ProtocolDrift)
+      assert.notInclude(JSON.stringify(logs), title)
+      assert.include(JSON.stringify(logs), 'responseBytes')
     }),
   )
 
@@ -204,6 +227,38 @@ describe('rpcCall', () => {
       )
       assert.isTrue(Result.isFailure(result))
       assert.strictEqual(calls, 1)
+    }),
+  )
+
+  it.live('keeps delete-source retries bounded for network, 429, and 5xx failures', () =>
+    Effect.gen(function* () {
+      const cases: Array<{
+        failure: FetchError | HttpStatusError
+        expectedCalls: number
+      }> = [
+        { failure: new FetchError({ url: 'u', cause: 'offline' }), expectedCalls: 3 },
+        { failure: new HttpStatusError({ url: 'u', status: 429 }), expectedCalls: 3 },
+        { failure: new HttpStatusError({ url: 'u', status: 503 }), expectedCalls: 3 },
+        { failure: new HttpStatusError({ url: 'u', status: 400 }), expectedCalls: 1 },
+      ]
+
+      for (const testCase of cases) {
+        let calls = 0
+        const layer = Layer.mergeAll(
+          httpHandlerTest(() => {
+            calls += 1
+            return Effect.fail(testCase.failure)
+          }),
+          NoopDebugLive,
+        )
+
+        const result = yield* Effect.result(
+          deleteSource('nb-1', 'source-1', session, 0).pipe(Effect.provide(layer)),
+        )
+
+        assert.isTrue(Result.isFailure(result))
+        assert.strictEqual(calls, testCase.expectedCalls)
+      }
     }),
   )
 })

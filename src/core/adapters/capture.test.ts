@@ -4,7 +4,9 @@ import { IpcError } from '../fx/errors'
 import { debugLogTest, httpTest, tabsTest } from '../fx/testing'
 import type { Capture } from '../model/types'
 import { captureSource } from './capture'
-import type { CaptureOptions, SourceAdapter } from './types'
+import type { ResolvedCapturable } from './registry'
+import type { CaptureOptions, Capturable, SourceAdapter } from './types'
+import { xAdapter } from './x/adapter'
 
 const CAPTURE: Capture = {
   kind: 'thread',
@@ -17,11 +19,27 @@ const CAPTURE: Capture = {
   },
 }
 
+const X_CAPTURE: Capture = {
+  kind: 'thread',
+  thread: {
+    site: 'x',
+    url: 'https://x.com/user/status/1',
+    title: 'An X thread',
+    author: { name: 'User' },
+    posts: [{ id: '1', author: { name: 'User' }, depth: 0, text: 'hello', byOp: true }],
+  },
+}
+
+const FOREIGN_X_CAPTURE: Capture = {
+  ...X_CAPTURE,
+  thread: { ...X_CAPTURE.thread, url: 'https://evil.com/user/status/1' },
+}
+
 function urlAdapter(onCapture: (url: string, options?: CaptureOptions) => void): SourceAdapter {
   return {
     id: 'reddit',
     hostMatch: [],
-    detect: () => null,
+    detect: () => ({ identity: 'abc123', kind: 'thread', label: 'Capture this discussion' }),
     strategy: {
       mode: 'url',
       capture: (url, options) =>
@@ -36,8 +54,20 @@ function urlAdapter(onCapture: (url: string, options?: CaptureOptions) => void):
 const contentScriptAdapter: SourceAdapter = {
   id: 'x',
   hostMatch: [],
-  detect: () => null,
+  detect: () => ({ identity: '1', kind: 'thread', label: 'Capture this thread' }),
   strategy: { mode: 'content-script' },
+}
+
+function resolved(adapter: SourceAdapter, capturable?: Capturable): ResolvedCapturable {
+  return {
+    url: 'https://reddit.com/x',
+    adapter,
+    capturable:
+      capturable ??
+      (adapter.id === 'x'
+        ? { identity: '1', kind: 'thread', label: 'Capture this thread' }
+        : { identity: 'abc123', kind: 'thread', label: 'Capture this discussion' }),
+  }
 }
 
 const base = Layer.mergeAll(httpTest({}), debugLogTest())
@@ -49,7 +79,7 @@ describe('captureSource', () => {
       const adapter = urlAdapter((url, options) =>
         calls.push({ url, ...(options !== undefined ? { options } : {}) }),
       )
-      const capture = yield* captureSource(adapter, 'https://reddit.com/x', {
+      const capture = yield* captureSource(resolved(adapter), {
         options: { enrichTranscripts: true },
       }).pipe(Effect.provide(Layer.mergeAll(base, tabsTest({}))))
 
@@ -63,7 +93,7 @@ describe('captureSource', () => {
   it.effect('fails a content-script adapter when no tab id is supplied', () =>
     Effect.gen(function* () {
       const outcome = yield* Effect.result(
-        captureSource(contentScriptAdapter, 'https://x.com/u/status/1').pipe(
+        captureSource(resolved(contentScriptAdapter)).pipe(
           Effect.provide(Layer.mergeAll(base, tabsTest({}))),
         ),
       )
@@ -84,16 +114,16 @@ describe('captureSource', () => {
           tabsTest({
             onSendMessage: (tabId, msg) => {
               relayed = { tabId, msg }
-              return { ok: true, capture: CAPTURE }
+              return { ok: true, capture: X_CAPTURE }
             },
           }),
         )
-        const capture = yield* captureSource(contentScriptAdapter, 'https://x.com/u/status/1', {
+        const capture = yield* captureSource(resolved(contentScriptAdapter), {
           tabId: 9,
         }).pipe(Effect.provide(layer))
 
         assert.deepStrictEqual(relayed, { tabId: 9, msg: { type: 'porter/extract-thread' } })
-        assert.deepStrictEqual(capture, CAPTURE)
+        assert.deepStrictEqual(capture, X_CAPTURE)
       }),
     )
 
@@ -104,9 +134,7 @@ describe('captureSource', () => {
           tabsTest({ onSendMessage: () => ({ ok: false, error: 'not signed in' }) }),
         )
         const outcome = yield* Effect.result(
-          captureSource(contentScriptAdapter, 'https://x.com/u/status/1', { tabId: 9 }).pipe(
-            Effect.provide(layer),
-          ),
+          captureSource(resolved(contentScriptAdapter), { tabId: 9 }).pipe(Effect.provide(layer)),
         )
         assert.isTrue(Result.isFailure(outcome))
         if (!Result.isFailure(outcome) || !(outcome.failure instanceof IpcError)) return
@@ -118,9 +146,7 @@ describe('captureSource', () => {
       Effect.gen(function* () {
         const layer = Layer.mergeAll(base, tabsTest({ onSendMessage: () => 'garbage' }))
         const outcome = yield* Effect.result(
-          captureSource(contentScriptAdapter, 'https://x.com/u/status/1', { tabId: 9 }).pipe(
-            Effect.provide(layer),
-          ),
+          captureSource(resolved(contentScriptAdapter), { tabId: 9 }).pipe(Effect.provide(layer)),
         )
         assert.isTrue(Result.isFailure(outcome))
         if (!Result.isFailure(outcome) || !(outcome.failure instanceof IpcError)) return
@@ -128,4 +154,74 @@ describe('captureSource', () => {
       }),
     )
   })
+
+  it.effect('rejects an adapter result with the wrong kind before it can be stored', () =>
+    Effect.gen(function* () {
+      const adapter = urlAdapter(() => {})
+      const outcome = yield* Effect.result(
+        captureSource(
+          resolved(adapter, { identity: 'abc123', kind: 'video', label: 'Capture this video' }),
+        ).pipe(Effect.provide(Layer.mergeAll(base, tabsTest({})))),
+      )
+      assert.isTrue(Result.isFailure(outcome))
+      if (!Result.isFailure(outcome)) return
+      assert.instanceOf(outcome.failure, IpcError)
+    }),
+  )
+
+  it.effect('rejects an adapter result from the wrong site before it can be stored', () =>
+    Effect.gen(function* () {
+      const adapter = {
+        ...urlAdapter(() => {}),
+        id: 'hackernews' as const,
+      }
+      const outcome = yield* Effect.result(
+        captureSource(resolved(adapter)).pipe(Effect.provide(Layer.mergeAll(base, tabsTest({})))),
+      )
+      assert.isTrue(Result.isFailure(outcome))
+      if (!Result.isFailure(outcome)) return
+      assert.instanceOf(outcome.failure, IpcError)
+    }),
+  )
+
+  it.effect('rejects a same-site capture for a different X status', () =>
+    Effect.gen(function* () {
+      const intentUrl = 'https://x.com/user/status/2'
+      const capturable = xAdapter.detect(intentUrl)
+      if (capturable === null) throw new Error('fixture URL must be capturable')
+      const layer = Layer.mergeAll(
+        base,
+        tabsTest({ onSendMessage: () => ({ ok: true, capture: X_CAPTURE }) }),
+      )
+      const outcome = yield* Effect.result(
+        captureSource({ url: intentUrl, adapter: xAdapter, capturable }, { tabId: 9 }).pipe(
+          Effect.provide(layer),
+        ),
+      )
+      assert.isTrue(Result.isFailure(outcome))
+      if (!Result.isFailure(outcome) || !(outcome.failure instanceof IpcError)) return
+      assert.strictEqual(outcome.failure.reason, 'Captured source did not match this URL')
+    }),
+  )
+
+  it.effect('rejects a foreign-host capture that imitates the requested X status', () =>
+    Effect.gen(function* () {
+      const intentUrl = 'https://x.com/user/status/1'
+      const capturable = xAdapter.detect(intentUrl)
+      if (capturable === null) throw new Error('fixture URL must be capturable')
+      const outcome = yield* Effect.result(
+        captureSource({ url: intentUrl, adapter: xAdapter, capturable }, { tabId: 9 }).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              base,
+              tabsTest({ onSendMessage: () => ({ ok: true, capture: FOREIGN_X_CAPTURE }) }),
+            ),
+          ),
+        ),
+      )
+      assert.isTrue(Result.isFailure(outcome))
+      if (!Result.isFailure(outcome) || !(outcome.failure instanceof IpcError)) return
+      assert.strictEqual(outcome.failure.reason, 'Captured source did not match this URL')
+    }),
+  )
 })

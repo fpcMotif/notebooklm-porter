@@ -51,13 +51,13 @@ export function kvTest(
   )
 }
 
-export function debugLogTest(sink: DebugEntry[] = []) {
+export function debugLogTest(sink: DebugEntry[] = [], onEntry?: (entry: DebugEntry) => void) {
   return Layer.succeed(
     DebugLog,
     DebugLog.of({
       log: (scope, msg, data, meta) =>
         Effect.sync(() => {
-          sink.push({
+          const entry: DebugEntry = {
             t: '',
             scope,
             msg,
@@ -65,7 +65,9 @@ export function debugLogTest(sink: DebugEntry[] = []) {
             ...(meta?.elapsedMs !== undefined ? { elapsedMs: meta.elapsedMs } : {}),
             ...(meta?.run !== undefined ? { run: meta.run } : {}),
             ...(data !== undefined ? { data } : {}),
-          })
+          }
+          sink.push(entry)
+          onEntry?.(entry)
         }),
       entries: () => Effect.sync(() => sink),
       clear: () =>
@@ -131,24 +133,36 @@ export interface RecordedHttpRequest {
   body?: string
 }
 
+export type HttpTestReply =
+  | string
+  | { readonly body: string; readonly status: number }
+  | { readonly error: unknown }
+
 /**
  * `requests`, if passed, is pushed into (mirrors `debugLogTest`'s sink
  * pattern) with every call's `{ url, body }` — lets a router test assert on
  * an outgoing RPC's envelope without router.ts exposing anything new.
  */
 export function httpTest(
-  responses: Record<string, string | string[]>,
+  responses: Record<string, HttpTestReply | HttpTestReply[]>,
   requests: RecordedHttpRequest[] = [],
+  onRequest?: (request: RecordedHttpRequest) => void,
 ) {
   const queued = new Map(
     Object.entries(responses).map(([url, body]) => [url, Array.isArray(body) ? [...body] : body]),
   )
   const fakeFetch = (async (url: string, init?: HttpInit) => {
-    requests.push({ url, ...(init?.body !== undefined ? { body: init.body.toString() } : {}) })
+    const request = { url, ...(init?.body !== undefined ? { body: init.body.toString() } : {}) }
+    requests.push(request)
+    onRequest?.(request)
     const configured = queued.get(url)
-    const body = Array.isArray(configured) ? configured.shift() : configured
-    return body !== undefined
-      ? new Response(body, { status: 200 })
+    const reply = Array.isArray(configured) ? configured.shift() : configured
+    if (typeof reply === 'object' && reply !== null && 'error' in reply) throw reply.error
+    if (typeof reply === 'object' && reply !== null) {
+      return new Response(reply.body, { status: reply.status })
+    }
+    return reply !== undefined
+      ? new Response(reply, { status: 200 })
       : new Response('not found', { status: 404 })
   }) as unknown as typeof fetch
   return Layer.succeed(Http, makeHttp(fakeFetch))

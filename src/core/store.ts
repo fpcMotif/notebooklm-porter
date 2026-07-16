@@ -3,13 +3,14 @@ import type { StorageError } from './fx/errors'
 import { kvSlot } from './fx/kv-slot'
 import { DebugLog, Kv } from './fx/services'
 import type { SourceDoc } from './model/types'
+import { decodeStoredSourceDocs } from './model/codec'
 
 /**
  * Capture queue in extension local storage (unlimitedStorage granted).
  * Docs are keyed by SourceDoc.id, so re-capturing a thread REPLACES the
  * stale doc instead of duplicating it — that is the dedup story.
  */
-const docsSlot = kvSlot<SourceDoc[]>('porter/docs', () => [])
+const docsSlot = kvSlot<SourceDoc[]>('porter/docs', () => [], decodeStoredSourceDocs)
 
 export function listDocs(): Effect.Effect<SourceDoc[], StorageError, Kv> {
   return Effect.gen(function* () {
@@ -48,7 +49,9 @@ export function storeCapturedDoc(doc: SourceDoc): Effect.Effect<void, StorageErr
       kind: doc.kind,
       wordCount: doc.wordCount,
       truncated: doc.truncated,
-      ...(doc.videoDocs !== undefined ? { videoTranscripts: doc.videoDocs.length } : {}),
+      ...(doc.kind === 'playlist' && doc.videoDocs !== undefined
+        ? { videoTranscripts: doc.videoDocs.length }
+        : {}),
     })
   })
 }

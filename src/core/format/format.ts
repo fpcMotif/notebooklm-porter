@@ -123,8 +123,9 @@ export function formatCapture(
     capturedAt,
     markdown,
     jsonl: playlistToJsonl(playlist),
+    playlistVideos: playlist.videos.map((video) => ({ ...video })),
     ...(playlist.transcriptDocs !== undefined && playlist.transcriptDocs.length > 0
-      ? { videoDocs: playlist.transcriptDocs }
+      ? { videoDocs: playlist.transcriptDocs.map((doc) => ({ ...doc })) }
       : {}),
     wordCount: countBodyWords(markdown),
     truncated: playlist.truncated ?? false,

@@ -10,6 +10,8 @@ import type { Capture, SiteId } from '../model/types'
  * them.
  */
 export interface Capturable {
+  /** Opaque native source identity. Only this adapter defines and compares it. */
+  identity: string
   kind: 'thread' | 'playlist' | 'video'
   label: string
   /** Present when this capture can attach transcript snapshots (`CaptureOptions.enrichTranscripts`). */

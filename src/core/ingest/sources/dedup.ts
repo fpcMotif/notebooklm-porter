@@ -1,7 +1,7 @@
 /**
  * Pure duplicate detection for a notebook's sources. Two sources are the "same"
- * when their normalized URL matches (tracking params stripped, YouTube collapsed
- * to video identity), falling back to a normalized title for URL-less sources.
+ * only when their URLs resolve to the same validated YouTube video identity.
+ * Titles and generic URLs are display-only: they never auto-group or delete.
  *
  * The console auto-removes duplicates, so grouping picks ONE keeper per group
  * (a ready copy beats a broken one, then earliest input order) and marks the
@@ -10,70 +10,11 @@
 import { youtubeVideoIdentity } from '../../adapters/youtube/video'
 import type { NotebookSource, SourceLoadStatus } from './model'
 
-/** Query keys dropped before comparing URLs — analytics + share noise. */
-const TRACKING_PARAM_PREFIXES = ['utm_'] as const
-const TRACKING_PARAMS: ReadonlySet<string> = new Set([
-  'fbclid',
-  'gclid',
-  'gclsrc',
-  'dclid',
-  'msclkid',
-  'mc_cid',
-  'mc_eid',
-  'igshid',
-  'si',
-  'ref',
-  'ref_src',
-  'ref_url',
-  'feature',
-  'spm',
-  'yclid',
-  '_hsenc',
-  '_hsmi',
-])
-
-function isTrackingParam(key: string): boolean {
-  const lower = key.toLowerCase()
-  return (
-    TRACKING_PARAMS.has(lower) || TRACKING_PARAM_PREFIXES.some((prefix) => lower.startsWith(prefix))
-  )
-}
-
-/**
- * Canonical comparison key for a source URL. YouTube URLs collapse to
- * `youtube:${videoId}` (so playlist/short/watch forms of one video match);
- * every other URL becomes `host/path?sortedNonTrackingParams` with `www.`,
- * fragment, and trailing slash removed. A non-URL string falls back to its
- * trimmed lowercase form.
- */
-export function normalizeSourceUrl(raw: string): string {
-  const youtube = youtubeVideoIdentity(raw)
-  if (youtube !== undefined) return `youtube:${youtube.videoId}`
-
-  let parsed: URL
-  try {
-    parsed = new URL(raw)
-  } catch {
-    return raw.trim().toLowerCase()
-  }
-
-  const host = parsed.hostname.toLowerCase().replace(/^www\./, '')
-  const params: { key: string; value: string }[] = []
-  for (const [key, value] of parsed.searchParams) {
-    if (!isTrackingParam(key)) params.push({ key, value })
-  }
-  params.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : a.value < b.value ? -1 : 1))
-  const query = params.map(({ key, value }) => `${key}=${value}`).join('&')
-  const path = parsed.pathname.replace(/\/+$/, '') || '/'
-  return `${host}${path}${query !== '' ? `?${query}` : ''}`
-}
-
-/** Dedup key: the normalized URL when present, else the normalized title. */
-export function sourceDedupeKey(source: NotebookSource): string {
-  if (source.url !== undefined && source.url.trim() !== '') {
-    return `url:${normalizeSourceUrl(source.url)}`
-  }
-  return `title:${source.title.trim().toLowerCase()}`
+/** Dedup key: a validated YouTube video identity, or no key. */
+export function sourceDedupeKey(source: NotebookSource): string | undefined {
+  if (source.url === undefined) return undefined
+  const youtube = youtubeVideoIdentity(source.url)
+  return youtube === undefined ? undefined : `youtube:${youtube.videoId}`
 }
 
 /** Keeper preference — a usable copy is kept over a broken/incomplete one. */
@@ -105,6 +46,7 @@ export function findDuplicateGroups(sources: readonly NotebookSource[]): Duplica
   const firstSeen = new Map<string, number>()
   sources.forEach((source, index) => {
     const key = sourceDedupeKey(source)
+    if (key === undefined) return
     const bucket = buckets.get(key)
     if (bucket === undefined) {
       buckets.set(key, [source])

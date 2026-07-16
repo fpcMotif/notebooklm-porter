@@ -11,6 +11,7 @@
  * update logic is fully unit-testable without mocking `browser.storage`.
  */
 import { Effect } from 'effect'
+import { notebookTargetKey, type NotebookTarget } from '../accounts/ownership'
 import type { StorageError } from '../fx/errors'
 import { isRecord } from '../fx/guards'
 import { kvSlot } from '../fx/kv-slot'
@@ -52,15 +53,15 @@ export function isLedger(value: unknown): value is Ledger {
 }
 
 /**
- * Classifies each doc against what's already recorded for `notebookId`.
+ * Classifies each doc against what's already recorded for `target`.
  * Order of the input `docs` is preserved within each bucket.
  */
 export function diffAgainstLedger(
   ledger: Ledger,
-  notebookId: string,
+  target: NotebookTarget,
   docs: LedgerDoc[],
 ): DiffResult {
-  const notebook = ledger[notebookId]
+  const notebook = ledger[notebookTargetKey(target)]
   const fresh: string[] = []
   const changed: string[] = []
   const unchanged: string[] = []
@@ -79,13 +80,13 @@ export function diffAgainstLedger(
   return { fresh, changed, unchanged }
 }
 
-/** Whether one unit's contentHash is already receipted for the notebook. */
+/** Whether one unit's contentHash is already receipted for the target. */
 export function isUnitSynced(
   ledger: Ledger,
-  notebookId: string,
+  target: NotebookTarget,
   unit: { id: string; contentHash: string },
 ): boolean {
-  return diffAgainstLedger(ledger, notebookId, [unit]).unchanged.length > 0
+  return diffAgainstLedger(ledger, target, [unit]).unchanged.length > 0
 }
 
 /**
@@ -96,12 +97,12 @@ export function isUnitSynced(
  */
 export function partitionSynced<T extends { id: string; contentHash: string }>(
   ledger: Ledger,
-  notebookId: string,
+  target: NotebookTarget,
   units: readonly T[],
 ): { pending: T[]; synced: T[]; changed: number } {
   const diff = diffAgainstLedger(
     ledger,
-    notebookId,
+    target,
     units.map((unit) => ({ id: unit.id, contentHash: unit.contentHash })),
   )
   const syncedIds = new Set(diff.unchanged)
@@ -123,19 +124,24 @@ export interface SyncedEntry {
 }
 
 /**
- * Returns a NEW ledger with `entries` upserted under `notebookId`. Never
+ * Returns a NEW ledger with `entries` upserted under `target`. Never
  * mutates the input ledger (or its nested notebook record) — callers may
  * hold onto the old reference (e.g. for a diff-before/after comparison).
  */
-export function recordSynced(ledger: Ledger, notebookId: string, entries: SyncedEntry[]): Ledger {
-  const existingNotebook = ledger[notebookId] ?? {}
+export function recordSynced(
+  ledger: Ledger,
+  target: NotebookTarget,
+  entries: SyncedEntry[],
+): Ledger {
+  const key = notebookTargetKey(target)
+  const existingNotebook = ledger[key] ?? {}
   const nextNotebook = { ...existingNotebook }
 
   for (const entry of entries) {
     nextNotebook[entry.id] = { contentHash: entry.contentHash, lastSynced: entry.now }
   }
 
-  return { ...ledger, [notebookId]: nextNotebook }
+  return { ...ledger, [key]: nextNotebook }
 }
 
 /**
@@ -155,11 +161,11 @@ export function contentHash(markdown: string): string {
   return (hash >>> 0).toString(16).padStart(8, '0')
 }
 
-const STORAGE_KEY = 'porter/ledger'
+export const LEDGER_STORAGE_KEY = 'porter/ledger/v2'
 
 /** Thin `Kv` wrapper — logic lives in the pure reducers above. */
 const ledgerSlot = kvSlot<Ledger>(
-  STORAGE_KEY,
+  LEDGER_STORAGE_KEY,
   () => ({}),
   (stored) => (isLedger(stored) ? stored : undefined),
 )

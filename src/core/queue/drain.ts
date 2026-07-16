@@ -1,5 +1,10 @@
 import { Effect, Result } from 'effect'
 import {
+  authenticateBoundAccount,
+  type BoundAccountAuthentication,
+  type NotebookLmAccountBinding,
+} from '../accounts/ownership'
+import {
   FetchError,
   HttpStatusError,
   NotLoggedIn,
@@ -11,7 +16,7 @@ import {
 import { Alarms, DebugLog, DomTabs, Http, Kv } from '../fx/services'
 import { deliverViaDom } from '../ingest/dom/delivery'
 import { sendIngestUnit } from '../ingest/notebooklm'
-import { fetchSession, listNotebooks, type NblmSession } from '../ingest/rpc/client'
+import { listNotebooks } from '../ingest/rpc/client'
 import {
   degradeForPreflightDrift,
   loadTierState,
@@ -50,6 +55,10 @@ export type DrainResult =
   | { status: 'failed'; jobId: string }
   | { status: 'blocked'; jobId: string }
 
+function accountBindingKey(binding: NotebookLmAccountBinding): string {
+  return JSON.stringify([binding.authuser, binding.accountEmail])
+}
+
 /** Maps only known typed transport failures into the queue's durable states. */
 export function classifyQueueFailure(failure: QueueFailure): QueueFailureDisposition {
   if (failure instanceof NotLoggedIn) {
@@ -78,7 +87,7 @@ export function classifyQueueFailure(failure: QueueFailure): QueueFailureDisposi
 function removeReceiptedJobs(queue: QueueState, ledger: Ledger): QueueState {
   let next = queue
   for (const job of queue.jobs) {
-    if (isUnitSynced(ledger, job.target.notebookId, job.unit)) {
+    if (isUnitSynced(ledger, job.target, job.unit)) {
       next = removeJob(next, job.id)
     }
   }
@@ -182,9 +191,9 @@ export function drainQueue(
 
     // Burst-scoped preflight caches — valid only within this single wake, so
     // the account-slot-reassignment window stays bounded to one drain pass.
-    const sessionByAuthuser = new Map<number, NblmSession>()
+    const authenticationByBinding = new Map<string, BoundAccountAuthentication>()
     const notebooksByAccount = new Map<string, { id: string; title: string }[]>()
-    let tierState = yield* loadTierState()
+    let tierState = yield* loadTierState(Date.parse(now))
     let lastResult: DrainResult = { status: 'idle' }
 
     // Each iteration removes a job or renders it non-due, so the due set
@@ -207,16 +216,17 @@ export function drainQueue(
         { run },
       )
 
-      // --- Identity (fetched once per authuser, reused across the burst) ---
-      let session = sessionByAuthuser.get(job.target.authuser)
-      if (session === undefined) {
-        const sessionResult = yield* Effect.result(fetchSession(job.target.authuser))
-        if (Result.isFailure(sessionResult)) {
-          const settled = settlePreflightFailure(queue, job, sessionResult.failure, now)
+      // --- Identity (fetched once per immutable account binding) ---
+      const bindingKey = accountBindingKey(job.target)
+      let authentication = authenticationByBinding.get(bindingKey)
+      if (authentication === undefined) {
+        const accountResult = yield* Effect.result(authenticateBoundAccount(job.target))
+        if (Result.isFailure(accountResult)) {
+          const settled = settlePreflightFailure(queue, job, accountResult.failure, now)
           yield* debugLog.log(
             'queue',
             'session preflight failed',
-            { disposition: settled.status, error: String(sessionResult.failure) },
+            { disposition: settled.status, error: String(accountResult.failure) },
             { run, level: settled.status === 'retrying' ? 'warn' : 'error' },
           )
           queue = settled.queue
@@ -224,10 +234,10 @@ export function drainQueue(
           lastResult = { status: settled.status, jobId: job.id }
           break // session unreachable applies to every remaining job — stop the burst
         }
-        session = sessionResult.success
-        sessionByAuthuser.set(job.target.authuser, session)
+        authentication = accountResult.success
+        authenticationByBinding.set(bindingKey, authentication)
       }
-      if (session.email !== job.target.accountEmail) {
+      if (authentication.status === 'account-changed') {
         queue = settleTerminalFailure(
           queue,
           job.id,
@@ -241,6 +251,8 @@ export function drainQueue(
         lastResult = { status: 'blocked', jobId: job.id }
         continue
       }
+      const account = authentication.account
+      const session = account.session
 
       // --- Tier routing + read-only canary (list fetched once per account) ---
       // Never route to DOM without a driver, even from persisted degraded state.
@@ -360,7 +372,7 @@ export function drainQueue(
       // Dedup insurance: if this unit was receipted since the burst began (or a
       // stale re-enqueue slipped past removeReceiptedJobs), drop it unsent so a
       // succeeded source is never created twice.
-      if (isUnitSynced(ledger, job.target.notebookId, job.unit)) {
+      if (isUnitSynced(ledger, job.target, job.unit)) {
         queue = removeJob(queue, job.id)
         yield* saveQueue(queue)
         yield* debugLog.log('queue', 'skip already-synced', {}, { run })
@@ -421,7 +433,7 @@ export function drainQueue(
         }
       }
 
-      ledger = recordSynced(ledger, job.target.notebookId, [
+      ledger = recordSynced(ledger, job.target, [
         { id: job.unit.id, contentHash: job.unit.contentHash, now },
       ])
       yield* saveLedger(ledger)

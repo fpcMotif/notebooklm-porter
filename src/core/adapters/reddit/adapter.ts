@@ -12,8 +12,10 @@ export const redditAdapter: SourceAdapter = {
   detect(url: string): Capturable | null {
     const u = safeUrl(url)
     if (!u) return null
-    if (/^\/r\/[^/]+\/comments\/[a-z0-9]+/i.test(u.pathname)) {
-      return { kind: 'thread', label: 'Capture this discussion' }
+    const match = /^\/r\/[^/]+\/comments\/([a-z0-9]+)/i.exec(u.pathname)
+    const postId = match?.[1]
+    if (postId !== undefined) {
+      return { identity: postId, kind: 'thread', label: 'Capture this discussion' }
     }
     return null
   },

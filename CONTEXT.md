@@ -50,9 +50,10 @@ and reviews; sharpen definitions here as they crystallize.
   notebook target + capture options) that periodically recaptures and enqueues in the
   background. Watches bind **mutable sources only** (threads, playlists — kinds that
   grow); a static video is not watchable.
-- **Storage lane** — background.ts's promise-chain mutex over one storage domain
-  (docs / watches / queue), acquired in fixed order so multi-domain work stays
-  deadlock-free.
+- **Storage lane** — a promise-chain mutex over one storage domain
+  (docs / watches / queue / settings), acquired in fixed order so multi-domain work stays
+  deadlock-free. One lane holds the whole message handler, including every settings
+  read-modify-write.
 
 ## NotebookLM ingest
 
@@ -69,3 +70,51 @@ and reviews; sharpen definitions here as they crystallize.
   mutation still performs a fresh authenticated listing.
 - **Debug ring** — capped append-only log in `storage.local`, readable from the popup
   (the SW console isn't). Content-free by policy: counts and kinds, never captured text.
+
+## NotebookLM identity
+
+- **NotebookLM account** — a Google identity recognized by its observed email.
+  `authuser` is only its current positional slot and may later name another identity.
+  _Avoid_: authuser account, account slot.
+- **NotebookLM account binding** — an immutable `authuser` + observed-email snapshot carried by
+  asynchronous NotebookLM commands. Background work authenticates this binding instead of reading
+  mutable selection to choose an account.
+  _Avoid_: selected account, account ID.
+- **Authenticated account** — a transient NotebookLM session whose observed email
+  matches the expected NotebookLM account for that `authuser` slot.
+  _Avoid_: session.
+- **Notebook target** — a notebook ID bound to one NotebookLM account by both
+  `authuser` and email. Queue jobs and watches retain this binding even when the
+  user's later selection changes.
+  _Avoid_: notebook ID, queue target.
+
+## NotebookLM source management
+
+- **Source Console** — a management view of the sources in one NotebookLM notebook.
+  It identifies duplicate sources and failed loads, then supports safe removal or
+  retry.
+  _Avoid_: manage sources, resource console.
+- **Proven duplicate** — two NotebookLM sources with the same validated YouTube video identity.
+  Titles and generic URLs are display evidence, not authority for automatic deletion.
+  _Avoid_: same-title source, normalized-URL duplicate.
+- **Notebook catalog** — the browsable notebooks for the active NotebookLM account
+  slot, plus the workflow that creates and reconciles a new notebook. Its cache speeds
+  browsing but never proves a delivery target.
+  _Avoid_: notebook list, notebook picker cache.
+
+## Drive backup
+
+- **Drive backup artifact** — one managed Markdown file for one stable `SourceDoc` identity.
+  Private Drive metadata owns identity; the readable filename is presentation only.
+  _Avoid_: title-keyed file, backup filename identity.
+- **Notebook workspace** — the popup's local account, catalog, selection, notebook draft,
+  Drive setting, and Source Console projection, plus the stale-result rules for those UI
+  workflows. It contains no NotebookLM protocol policy.
+  _Avoid_: notebook picker state, popup account state.
+
+## X capture
+
+- **X thread evidence** — bounded, document-local GraphQL observations reconciled with
+  the DOM floor for one X conversation. It may enrich a DOM tweet but never remove or
+  weaken DOM evidence.
+  _Avoid_: GraphQL cache, captured tweets.
