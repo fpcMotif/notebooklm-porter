@@ -8,8 +8,9 @@ import {
   type AlarmError,
   type StorageError,
 } from '../fx/errors'
-import { Alarms, DebugLog, DomTabs, Http, Kv } from '../fx/services'
+import { Alarms, DebugLog, Http, Kv } from '../fx/services'
 import { deliverViaDom } from '../ingest/dom/delivery'
+import { DomTabs } from '../ingest/dom/driver'
 import { sendIngestUnit } from '../ingest/notebooklm'
 import { fetchSession, listNotebooks, type NblmSession } from '../ingest/rpc/client'
 import {

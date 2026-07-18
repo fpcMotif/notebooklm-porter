@@ -4,19 +4,18 @@
  */
 import { Effect, Layer } from 'effect'
 import { clearDebugLog, dbg, getDebugLog } from '../debug'
+import { DomTabs, makeDomTabs } from '../ingest/dom/driver'
 import { PorterClient, unwrapPorterReply, type PorterMessage, type PorterReply } from '../messaging'
 import { DriveAuthError, IpcError, StorageError } from './errors'
 import {
   Alarms,
   DebugLog,
-  DomTabs,
   Http,
   Identity,
   Kv,
   Scripting,
   Tabs,
   makeAlarms,
-  makeDomTabs,
   makeHttp,
   makeScripting,
   makeTabs,

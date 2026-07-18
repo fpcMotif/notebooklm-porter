@@ -6,12 +6,12 @@
 import { Effect, Layer } from 'effect'
 import type { DebugEntry } from '../debug'
 import type { DomDeliveryRequest, DomDeliveryResult } from '../ingest/dom/contracts'
+import { DomTabs } from '../ingest/dom/driver'
 import { PorterClient, unwrapPorterReply, type PorterMessage, type PorterReply } from '../messaging'
 import { DriveAuthError, FetchError, HttpStatusError, IpcError } from './errors'
 import {
   Alarms,
   DebugLog,
-  DomTabs,
   Http,
   type HttpInit,
   Identity,
