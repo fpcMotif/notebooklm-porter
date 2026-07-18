@@ -11,8 +11,10 @@
  * update logic is fully unit-testable without mocking `browser.storage`.
  */
 import { Effect } from 'effect'
-import { Kv } from '../fx/services'
 import type { StorageError } from '../fx/errors'
+import { isRecord } from '../fx/guards'
+import { kvSlot } from '../fx/kv-slot'
+import { Kv } from '../fx/services'
 
 export interface LedgerEntry {
   contentHash: string
@@ -33,10 +35,6 @@ export interface DiffResult {
   changed: string[]
   /** Present with a matching contentHash — already synced, skip. */
   unchanged: string[]
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function isLedgerEntry(value: unknown): value is LedgerEntry {
@@ -81,6 +79,43 @@ export function diffAgainstLedger(
   return { fresh, changed, unchanged }
 }
 
+/** Whether one unit's contentHash is already receipted for the notebook. */
+export function isUnitSynced(
+  ledger: Ledger,
+  notebookId: string,
+  unit: { id: string; contentHash: string },
+): boolean {
+  return diffAgainstLedger(ledger, notebookId, [unit]).unchanged.length > 0
+}
+
+/**
+ * Splits units into those the notebook still needs (`pending`) and those
+ * already receipted unchanged (`synced`). `changed` counts the pending
+ * units the ledger knows under a different contentHash — re-sends, not
+ * new sources — so callers can log the distinction without re-deriving it.
+ */
+export function partitionSynced<T extends { id: string; contentHash: string }>(
+  ledger: Ledger,
+  notebookId: string,
+  units: readonly T[],
+): { pending: T[]; synced: T[]; changed: number } {
+  const diff = diffAgainstLedger(
+    ledger,
+    notebookId,
+    units.map((unit) => ({ id: unit.id, contentHash: unit.contentHash })),
+  )
+  const syncedIds = new Set(diff.unchanged)
+  const pending: T[] = []
+  const synced: T[] = []
+
+  for (const unit of units) {
+    if (syncedIds.has(unit.id)) synced.push(unit)
+    else pending.push(unit)
+  }
+
+  return { pending, synced, changed: diff.changed.length }
+}
+
 export interface SyncedEntry {
   id: string
   contentHash: string
@@ -123,17 +158,16 @@ export function contentHash(markdown: string): string {
 const STORAGE_KEY = 'porter/ledger'
 
 /** Thin `Kv` wrapper — logic lives in the pure reducers above. */
+const ledgerSlot = kvSlot<Ledger>(
+  STORAGE_KEY,
+  () => ({}),
+  (stored) => (isLedger(stored) ? stored : undefined),
+)
+
 export function loadLedger(): Effect.Effect<Ledger, StorageError, Kv> {
-  return Effect.gen(function* () {
-    const kv = yield* Kv
-    const stored = yield* kv.get<unknown>(STORAGE_KEY)
-    return isLedger(stored) ? stored : {}
-  })
+  return ledgerSlot.load()
 }
 
 export function saveLedger(ledger: Ledger): Effect.Effect<void, StorageError, Kv> {
-  return Effect.gen(function* () {
-    const kv = yield* Kv
-    yield* kv.set(STORAGE_KEY, ledger)
-  })
+  return ledgerSlot.save(ledger)
 }

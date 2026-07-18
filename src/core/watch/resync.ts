@@ -1,6 +1,5 @@
 import { Effect, Result } from 'effect'
 import { adapterForUrl } from '../adapters/registry'
-import { capturePlaylist } from '../adapters/youtube/capture'
 import type { AlarmError, StorageError } from '../fx/errors'
 import { Alarms, DebugLog, Http, Kv } from '../fx/services'
 import { formatCapture } from '../format/format'
@@ -8,6 +7,7 @@ import { planIngestUnits } from '../ingest/units'
 import { QUEUE_ALARM, enqueueUnits, supersedePendingUnitVersions } from '../queue/queue'
 import { loadQueue, saveQueue } from '../queue/store'
 import { upsertDoc } from '../store'
+import { loadLedger, partitionSynced } from '../store/ledger'
 import { loadWatches, saveWatches } from './store'
 import {
   disableWatch,
@@ -61,15 +61,18 @@ export function resyncOneDueWatch(
       'resync tick',
       {
         sourceDocId: watch.sourceDocId,
-        enrich: watch.enrichYoutube === true,
+        enrich: watch.captureOptions?.enrichTranscripts === true,
         totalWatches: watches.watches.length,
       },
       { run },
     )
 
     const adapter = adapterForUrl(watch.sourceUrl)
-    const captureFromUrl = adapter?.contentScript ? undefined : adapter?.captureFromUrl
-    if (captureFromUrl === undefined || adapter?.detect(watch.sourceUrl) === null) {
+    if (
+      adapter === undefined ||
+      adapter.strategy.mode !== 'url' ||
+      adapter.detect(watch.sourceUrl) === null
+    ) {
       const disabled = disableWatch(
         watches,
         watch.id,
@@ -88,16 +91,14 @@ export function resyncOneDueWatch(
     }
 
     const captured = yield* Effect.result(
-      watch.enrichYoutube === true && adapter?.id === 'youtube'
-        ? capturePlaylist(watch.sourceUrl, { enrichTranscripts: true })
-        : captureFromUrl(watch.sourceUrl),
+      adapter.strategy.capture(watch.sourceUrl, watch.captureOptions),
     )
     if (Result.isFailure(captured)) {
       const failed = rescheduleWatchFailure(watches, watch.id, 'Could not recapture source', now)
       yield* debugLog.log(
         'watch',
         'recapture failed',
-        { adapterId: adapter?.id ?? 'none', error: String(captured.failure) },
+        { adapterId: adapter.id, error: String(captured.failure) },
         { run, level: 'warn' },
       )
       yield* saveWatches(failed)
@@ -126,19 +127,32 @@ export function resyncOneDueWatch(
     yield* upsertDoc(doc)
     const queue = yield* loadQueue()
     const units = planIngestUnits(doc)
+    // supersede runs over ALL units — even an already-synced unit may leave a
+    // stale pending older version worth dropping — but only units the ledger
+    // doesn't already have unchanged are worth enqueueing.
     const withoutSuperseded = supersedePendingUnitVersions(queue, watch.target, units)
-    const nextQueue = enqueueUnits(withoutSuperseded, watch.target, units, now)
+    const ledger = yield* loadLedger()
+    const { pending, synced } = partitionSynced(ledger, watch.target.notebookId, units)
+    const nextQueue = enqueueUnits(withoutSuperseded, watch.target, pending, now)
     yield* saveQueue(nextQueue)
 
     const complete = rescheduleWatchSuccess(watches, watch.id, now)
     yield* saveWatches(complete)
     yield* armNextWatch(complete)
-    const alarms = yield* Alarms
-    yield* alarms.schedule(QUEUE_ALARM, Date.parse(now))
+    // An all-synced tick has nothing for the drain to do — don't wake it.
+    if (pending.length > 0) {
+      const alarms = yield* Alarms
+      yield* alarms.schedule(QUEUE_ALARM, Date.parse(now))
+    }
     yield* debugLog.log(
       'watch',
       'resynced',
-      { docId: doc.id, unitCount: units.length, notebookId: watch.target.notebookId },
+      {
+        docId: doc.id,
+        unitCount: units.length,
+        notebookId: watch.target.notebookId,
+        alreadySynced: synced.length,
+      },
       { run },
     )
     return { status: 'queued', watchId: watch.id, docId: doc.id }

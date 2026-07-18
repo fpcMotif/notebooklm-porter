@@ -8,7 +8,6 @@ import type { Capturable, SourceAdapter } from '../types'
 export const xAdapter: SourceAdapter = {
   id: 'x',
   hostMatch: ['https://x.com/*', 'https://twitter.com/*', 'https://mobile.twitter.com/*'],
-  contentScript: true,
   detect(url: string): Capturable | null {
     const u = safeUrl(url)
     if (!u) return null
@@ -18,6 +17,9 @@ export const xAdapter: SourceAdapter = {
     }
     return null
   },
+  // Extraction runs in entrypoints/x.content.ts; this adapter only contributes
+  // detection and host permissions.
+  strategy: { mode: 'content-script' },
 }
 
 function safeUrl(url: string): URL | null {

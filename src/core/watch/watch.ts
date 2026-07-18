@@ -1,3 +1,4 @@
+import type { CaptureOptions } from '../adapters/types'
 import type { QueueTarget } from '../queue/queue'
 
 export const WATCH_INTERVAL_MS = 6 * 60 * 60 * 1_000
@@ -12,8 +13,8 @@ export interface Watch {
   sourceDocId: string
   sourceUrl: string
   target: QueueTarget
-  /** Preserve the user's explicit YouTube transcript-capture choice on every run. */
-  enrichYoutube?: true
+  /** Preserve the user's explicit transcript-capture choice on every run. */
+  captureOptions?: CaptureOptions
   intervalMs: number
   status: WatchStatus
   nextRunAt: string
@@ -42,7 +43,7 @@ export interface CreateWatchInput {
   sourceDocId: string
   sourceUrl: string
   target: QueueTarget
-  enrichYoutube?: true
+  captureOptions?: CaptureOptions
   now: string
   intervalMs?: number
 }
@@ -70,7 +71,7 @@ export function upsertWatch(state: WatchState, input: CreateWatchInput): WatchSt
     sourceDocId: input.sourceDocId,
     sourceUrl: input.sourceUrl,
     target: { ...input.target },
-    ...(input.enrichYoutube === true ? { enrichYoutube: true as const } : {}),
+    ...(input.captureOptions !== undefined ? { captureOptions: input.captureOptions } : {}),
     intervalMs,
     status: 'active',
     nextRunAt: nextRunAt(input.now, intervalMs),

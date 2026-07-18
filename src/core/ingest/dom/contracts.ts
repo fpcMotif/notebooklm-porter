@@ -1,3 +1,4 @@
+import { isRecord } from '../../fx/guards'
 import type { IngestUnit } from '../units'
 
 /** One visible-tab attempt for an immutable queue unit. */
@@ -15,10 +16,6 @@ export type DomDeliveryResult =
   | { status: 'sent' }
   | { status: 'unavailable'; reason: string }
   | { status: 'uncertain'; reason: string }
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-}
 
 function isIngestUnit(value: unknown): value is IngestUnit {
   if (!isRecord(value)) return false

@@ -6,11 +6,11 @@
  */
 import { Effect } from 'effect'
 import { discoverAccounts } from './accounts/discover'
+import { captureSource, captureViaContentScript } from './adapters/capture'
 import { adapterForUrl } from './adapters/registry'
-import { capturePlaylist } from './adapters/youtube/capture'
 import { backupDocsToDrive } from './backup/client'
-import { IpcError, NotLoggedIn, ProtocolDrift, type PorterError } from './fx/errors'
-import { Alarms, DebugLog, type Http, type Identity, type Kv, Tabs } from './fx/services'
+import { NotLoggedIn, ProtocolDrift, type PorterError } from './fx/errors'
+import { Alarms, DebugLog, type Http, type Identity, type Kv, type Tabs } from './fx/services'
 import { formatCapture } from './format/format'
 import { exportDocs } from './ingest/export'
 import {
@@ -26,25 +26,20 @@ import { RPC_IDS } from './ingest/rpc/protocol'
 import { scanSources } from './ingest/sources/console'
 import { duplicateRemovalIds, findDuplicateGroups } from './ingest/sources/dedup'
 import { planIngestUnits } from './ingest/units'
-import {
-  isExtractResponse,
-  type ContentRequest,
-  type NotebookMeta,
-  type PorterMessage,
-  type PorterReply,
-} from './messaging'
-import type { SourceDoc } from './model/types'
+import { type NotebookMeta, type PorterMessage, type PorterReply } from './messaging'
+import type { Capture } from './model/types'
 import { getSettings, notebookTargetPatch, updateSettings, type PorterSettings } from './settings'
 import { QUEUE_ALARM, enqueueUnits, queueSnapshot, retryJob, type QueueTarget } from './queue/queue'
 import { loadQueue, saveQueue } from './queue/store'
-import { deleteDoc, listDocs, upsertDoc } from './store'
-import { diffAgainstLedger, loadLedger } from './store/ledger'
+import { deleteDoc, listDocs, storeCapturedDoc } from './store'
+import { loadLedger, partitionSynced } from './store/ledger'
 import {
   cacheNotebooks,
   loadNotebookCache,
   readCachedNotebooks,
   saveNotebookCache,
 } from './store/notebooks-cache'
+import { canWatchSource } from './watch/eligibility'
 import { armNextWatch } from './watch/resync'
 import { loadWatches, saveWatches } from './watch/store'
 import { removeWatch, removeWatchesForSourceDoc, upsertWatch, watchSnapshot } from './watch/watch'
@@ -57,44 +52,60 @@ type Handlers = {
   ) => Effect.Effect<PorterReply<K>, PorterError, PorterServices>
 }
 
-/**
- * Persists a freshly captured doc and records a content-free summary in the
- * debug ring — counts and kinds, never titles or bodies — so a copied log
- * shows what capture produced without leaking the captured text.
- */
-function storeCapturedDoc(doc: SourceDoc) {
-  return Effect.gen(function* () {
-    yield* upsertDoc(doc)
-    const debugLog = yield* DebugLog
-    yield* debugLog.log('capture', 'stored', {
-      docId: doc.id,
-      site: doc.site,
-      kind: doc.kind,
-      wordCount: doc.wordCount,
-      truncated: doc.truncated,
-      ...(doc.videoDocs !== undefined ? { videoTranscripts: doc.videoDocs.length } : {}),
-    })
-  })
-}
+export type StorageDomain = 'docs' | 'watches' | 'queue' | 'settings'
+
+/** Fixed global lane-acquisition order; multi-domain work always acquires in this order so the composition stays deadlock-free. */
+export const LANE_ORDER: readonly StorageDomain[] = ['docs', 'watches', 'queue', 'settings']
 
 /**
- * Shared by 'porter/capture-page' and 'porter/capture-url' (for
- * `contentScript: true` adapters, e.g. X): relay an extract request to the
- * tab's content script, then format + store whatever it reports.
+ * Which storage domains each message's handler MUTATES — the serialization
+ * contract background.ts derives its lanes from. Exhaustive over
+ * PorterMessage['type']: adding a message type without declaring its
+ * footprint is a compile error. Read-only handlers declare [] and run
+ * unserialized (readers may see a snapshot mid-write; all writes go through
+ * a lane).
  */
-function captureViaContentScript(tabId: number) {
+export const MESSAGE_DOMAINS: { [K in PorterMessage['type']]: readonly StorageDomain[] } = {
+  'porter/detect': [],
+  'porter/capture-url': ['docs'],
+  'porter/capture-page': ['docs'],
+  'porter/capture-result': ['docs'],
+  'porter/list-docs': [],
+  'porter/delete-doc': ['docs', 'watches'],
+  'porter/export': [],
+  'porter/queue-enqueue': ['queue', 'settings'],
+  'porter/queue-status': ['queue'],
+  'porter/queue-retry': ['queue'],
+  'porter/watch-create': ['watches'],
+  'porter/watch-list': ['watches'],
+  'porter/watch-remove': ['watches'],
+  // Writes the notebooks-cache (a read-modify-write on its own Kv key), but
+  // the cache is browse-only, so a lost cache update is harmless — runs unserialized.
+  'porter/list-notebooks': [],
+  'porter/create-notebook': [],
+  'porter/nblm-scan-console': [],
+  'porter/nblm-dedupe': [],
+  'porter/nblm-retry-source': [],
+  'porter/accounts-refresh': ['settings'],
+  'porter/get-settings': [],
+  'porter/update-settings': ['settings'],
+  // Remote Drive upload + local reads only; no local Kv key is mutated.
+  'porter/backup-drive': [],
+  'porter/debug-log': [],
+  'porter/debug-clear': [],
+}
+
+/** Domains for one message type, in LANE_ORDER, [] for unknown wire types. */
+export function domainsForMessage(type: string): readonly StorageDomain[] {
+  const entry = (MESSAGE_DOMAINS as Record<string, readonly StorageDomain[]>)[type]
+  if (entry === undefined) return []
+  return LANE_ORDER.filter((domain) => entry.includes(domain))
+}
+
+/** Formats and persists a fresh capture, then replies with the stored doc. */
+function storeAndReply(capture: Capture) {
   return Effect.gen(function* () {
-    const tabs = yield* Tabs
-    const response = yield* tabs.sendMessage(tabId, {
-      type: 'porter/extract-thread',
-    } satisfies ContentRequest)
-    if (!isExtractResponse(response)) {
-      return { ok: false as const, error: 'Malformed content-script response' }
-    }
-    if (!response.ok) {
-      return { ok: false as const, error: response.error }
-    }
-    const doc = formatCapture(response.capture)
+    const doc = formatCapture(capture)
     yield* storeCapturedDoc(doc)
     return { ok: true as const, docs: [doc] }
   })
@@ -162,7 +173,7 @@ function cacheFreshNotebooks(session: NblmSession, authuser: number, notebooks: 
 function verifyTargetNotebook(
   notebookId: string,
 ): Effect.Effect<
-  { settings: PorterSettings; target: QueueTarget },
+  { settings: PorterSettings; target: QueueTarget } | { ok: false; error: string },
   PorterError,
   Http | Kv | DebugLog
 > {
@@ -180,9 +191,7 @@ function verifyTargetNotebook(
     }
     const notebooks = yield* listNotebooks(session, settings.nblmAuthuser)
     if (!notebooks.some((notebook) => notebook.id === notebookId)) {
-      return yield* Effect.fail(
-        new IpcError({ reason: 'Choose a notebook from the current account' }),
-      )
+      return { ok: false as const, error: 'Choose a notebook from the current account' }
     }
     return {
       settings,
@@ -224,43 +233,26 @@ function authenticatedNblm(): Effect.Effect<
 
 const handlers: Handlers = {
   'porter/detect': (msg) => {
-    const adapter = adapterForUrl(msg.url)
-    const capturable = adapter?.detect(msg.url)
+    const capturable = adapterForUrl(msg.url)?.detect(msg.url)
     return Effect.succeed({
       ok: true as const,
       ...(capturable ? { capturable: capturable.label } : {}),
-      ...(adapter?.id === 'youtube' && capturable?.kind === 'playlist'
-        ? { canEnrichYoutube: true as const }
-        : {}),
+      ...(capturable?.canEnrichTranscripts === true ? { canEnrichTranscripts: true as const } : {}),
     })
   },
   'porter/capture-url': (msg) => {
     const adapter = adapterForUrl(msg.url)
-    if (adapter?.contentScript) {
-      return captureViaContentScript(msg.tabId)
-    }
-    const captureFromUrl = adapter?.captureFromUrl
-    if (!captureFromUrl) {
+    if (adapter === undefined) {
       return Effect.succeed({ ok: false as const, error: 'Nothing capturable on this page' })
     }
-    return Effect.gen(function* () {
-      const capture = yield* msg.enrichYoutube === true &&
-      adapter.id === 'youtube' &&
-      adapter.detect(msg.url)?.kind === 'playlist'
-        ? capturePlaylist(msg.url, { enrichTranscripts: true })
-        : captureFromUrl(msg.url)
-      const doc = formatCapture(capture)
-      yield* storeCapturedDoc(doc)
-      return { ok: true as const, docs: [doc] }
-    })
+    return captureSource(adapter, msg.url, {
+      tabId: msg.tabId,
+      ...(msg.options !== undefined ? { options: msg.options } : {}),
+    }).pipe(Effect.flatMap(storeAndReply))
   },
-  'porter/capture-page': (msg) => captureViaContentScript(msg.tabId),
-  'porter/capture-result': (msg) =>
-    Effect.gen(function* () {
-      const doc = formatCapture(msg.capture)
-      yield* storeCapturedDoc(doc)
-      return { ok: true as const, docs: [doc] }
-    }),
+  'porter/capture-page': (msg) =>
+    captureViaContentScript(msg.tabId).pipe(Effect.flatMap(storeAndReply)),
+  'porter/capture-result': (msg) => storeAndReply(msg.capture),
   'porter/list-docs': () =>
     Effect.gen(function* () {
       const docs = yield* listDocs()
@@ -282,7 +274,9 @@ const handlers: Handlers = {
     }),
   'porter/queue-enqueue': (msg) =>
     Effect.gen(function* () {
-      const { settings, target } = yield* verifyTargetNotebook(msg.notebookId)
+      const verified = yield* verifyTargetNotebook(msg.notebookId)
+      if ('ok' in verified) return verified
+      const { settings, target } = verified
       const docs = yield* listDocs()
       const requested = new Set(msg.docIds)
       const selectedDocs = docs.filter((doc) => requested.has(doc.id))
@@ -291,13 +285,11 @@ const handlers: Handlers = {
       // create a second copy of an unchanged source. The logged breakdown also
       // exposes whether the ledger actually remembers a prior run.
       const ledger = yield* loadLedger()
-      const diff = diffAgainstLedger(
-        ledger,
-        msg.notebookId,
-        units.map((unit) => ({ id: unit.id, contentHash: unit.contentHash })),
-      )
-      const alreadySynced = new Set(diff.unchanged)
-      const pendingUnits = units.filter((unit) => !alreadySynced.has(unit.id))
+      const {
+        pending: pendingUnits,
+        synced,
+        changed,
+      } = partitionSynced(ledger, msg.notebookId, units)
       const queue = yield* loadQueue()
       const next = enqueueUnits(queue, target, pendingUnits, new Date().toISOString())
       yield* saveQueue(next)
@@ -306,8 +298,8 @@ const handlers: Handlers = {
         notebookId: msg.notebookId,
         requestedDocs: selectedDocs.length,
         plannedUnits: units.length,
-        alreadySynced: diff.unchanged.length,
-        changed: diff.changed.length,
+        alreadySynced: synced.length,
+        changed,
         enqueued: pendingUnits.length,
         pending: next.jobs.length,
       })
@@ -338,26 +330,16 @@ const handlers: Handlers = {
     }),
   'porter/watch-create': (msg) =>
     Effect.gen(function* () {
-      const { target } = yield* verifyTargetNotebook(msg.notebookId)
+      const verified = yield* verifyTargetNotebook(msg.notebookId)
+      if ('ok' in verified) return verified
+      const { target } = verified
 
       const doc = (yield* listDocs()).find((candidate) => candidate.id === msg.docId)
       if (doc === undefined) {
-        return yield* Effect.fail(new IpcError({ reason: 'The captured source no longer exists' }))
+        return { ok: false as const, error: 'The captured source no longer exists' }
       }
-      const adapter = adapterForUrl(doc.canonicalUrl)
-      const supportedWatch =
-        (doc.site === 'youtube' && doc.kind === 'playlist' && adapter?.id === 'youtube') ||
-        (doc.site === 'reddit' && doc.kind === 'thread' && adapter?.id === 'reddit') ||
-        (doc.site === 'hackernews' && doc.kind === 'thread' && adapter?.id === 'hackernews')
-      if (
-        !supportedWatch ||
-        adapter.contentScript ||
-        adapter.captureFromUrl === undefined ||
-        adapter.detect(doc.canonicalUrl) === null
-      ) {
-        return yield* Effect.fail(
-          new IpcError({ reason: 'This source cannot be resynced in the background yet' }),
-        )
+      if (!canWatchSource(doc)) {
+        return { ok: false as const, error: 'This source cannot be resynced in the background yet' }
       }
 
       const watches = yield* loadWatches()
@@ -366,7 +348,7 @@ const handlers: Handlers = {
         sourceUrl: doc.canonicalUrl,
         target,
         ...(doc.videoDocs !== undefined && doc.videoDocs.length > 0
-          ? { enrichYoutube: true as const }
+          ? { captureOptions: { enrichTranscripts: true as const } }
           : {}),
         now: new Date().toISOString(),
       })

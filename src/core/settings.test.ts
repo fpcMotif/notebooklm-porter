@@ -1,6 +1,6 @@
 import { assert, describe, it } from '@effect/vitest'
-import { Effect, Layer } from 'effect'
-import { Kv } from './fx/services'
+import { Effect } from 'effect'
+import { kvTest } from './fx/testing'
 import {
   DEFAULT_SETTINGS,
   getSettings,
@@ -9,26 +9,12 @@ import {
   updateSettings,
 } from './settings'
 
-function makeKvLayer(initial: Record<string, unknown> = {}) {
-  const store = new Map<string, unknown>(Object.entries(initial))
-  return Layer.succeed(
-    Kv,
-    Kv.of({
-      get: <T>(key: string) => Effect.succeed(store.get(key) as T | undefined),
-      set: <T>(key: string, value: T) =>
-        Effect.sync(() => {
-          store.set(key, value)
-        }),
-    }),
-  )
-}
-
 describe('settings', () => {
   it.effect('getSettings returns defaults when nothing is stored', () =>
     Effect.gen(function* () {
       const settings = yield* getSettings()
       assert.deepStrictEqual(settings, DEFAULT_SETTINGS)
-    }).pipe(Effect.provide(makeKvLayer())),
+    }).pipe(Effect.provide(kvTest())),
   )
 
   it.effect('updateSettings merges the patch into current settings and persists it', () =>
@@ -43,7 +29,7 @@ describe('settings', () => {
 
       const reread = yield* getSettings()
       assert.deepStrictEqual(reread, second)
-    }).pipe(Effect.provide(makeKvLayer())),
+    }).pipe(Effect.provide(kvTest())),
   )
 
   it('resolves only notebook IDs present in the freshly listed active account', () => {

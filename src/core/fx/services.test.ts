@@ -1,7 +1,14 @@
 import { assert, describe, it } from '@effect/vitest'
 import { Effect, Result } from 'effect'
 import { AlarmError, FetchError, HttpStatusError, IpcError } from './errors'
-import { makeAlarms, makeDomTabs, makeHttp, makeScripting, notebookTabUrl } from './services'
+import {
+  makeAlarms,
+  makeDomTabs,
+  makeHttp,
+  makeScripting,
+  makeTabs,
+  notebookTabUrl,
+} from './services'
 
 const domRequest = {
   notebookId: 'nb-1',
@@ -157,6 +164,86 @@ describe('makeScripting', () => {
 
       assert.isTrue(Result.isFailure(result))
       if (Result.isFailure(result)) assert.instanceOf(result.failure, IpcError)
+    }),
+  )
+})
+
+describe('makeTabs', () => {
+  it.effect('reports the active tab id and url when both are present', () =>
+    Effect.gen(function* () {
+      const tabs = makeTabs({
+        query: async () => [{ id: 7, url: 'https://example.com' }],
+        sendMessage: async () => 'unused',
+      })
+
+      const tab = yield* tabs.activeTab()
+
+      assert.deepStrictEqual(tab, { id: 7, url: 'https://example.com' })
+    }),
+  )
+
+  it.effect('omits id and url fields entirely when the active tab reports neither', () =>
+    Effect.gen(function* () {
+      const tabs = makeTabs({
+        query: async () => [{}],
+        sendMessage: async () => 'unused',
+      })
+
+      const tab = yield* tabs.activeTab()
+
+      assert.deepStrictEqual(tab, {})
+      assert.isFalse('id' in tab)
+      assert.isFalse('url' in tab)
+    }),
+  )
+
+  it.effect('maps a rejected tabs.query to IpcError', () =>
+    Effect.gen(function* () {
+      const tabs = makeTabs({
+        query: async () => {
+          throw new Error('no active tab')
+        },
+        sendMessage: async () => 'unused',
+      })
+
+      const result = yield* Effect.result(tabs.activeTab())
+
+      assert.isTrue(Result.isFailure(result))
+      if (Result.isFailure(result)) assert.instanceOf(result.failure, IpcError)
+    }),
+  )
+
+  it.effect('maps a rejected tabs.sendMessage to IpcError', () =>
+    Effect.gen(function* () {
+      const tabs = makeTabs({
+        query: async () => [],
+        sendMessage: async () => {
+          throw new Error('receiving end does not exist')
+        },
+      })
+
+      const result = yield* Effect.result(tabs.sendMessage(42, { type: 'ping' }))
+
+      assert.isTrue(Result.isFailure(result))
+      if (Result.isFailure(result)) assert.instanceOf(result.failure, IpcError)
+    }),
+  )
+
+  it.effect('relays a successful tabs.sendMessage response', () =>
+    Effect.gen(function* () {
+      const calls: unknown[] = []
+      const tabs = makeTabs({
+        query: async () => [],
+        sendMessage: async (tabId, message) => {
+          calls.push([tabId, message])
+          return { ok: true }
+        },
+      })
+
+      const response = yield* tabs.sendMessage(42, { type: 'ping' })
+
+      assert.deepStrictEqual(response, { ok: true })
+      assert.deepStrictEqual(calls, [[42, { type: 'ping' }]])
     }),
   )
 })

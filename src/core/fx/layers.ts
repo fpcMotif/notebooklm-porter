@@ -4,12 +4,7 @@
  */
 import { Effect, Layer } from 'effect'
 import { clearDebugLog, dbg, getDebugLog } from '../debug'
-import {
-  PorterClient,
-  type PorterMessage,
-  type PorterReply,
-  type PorterResponseMap,
-} from '../messaging'
+import { PorterClient, unwrapPorterReply, type PorterMessage, type PorterReply } from '../messaging'
 import { DriveAuthError, IpcError, StorageError } from './errors'
 import {
   Alarms,
@@ -24,6 +19,7 @@ import {
   makeDomTabs,
   makeHttp,
   makeScripting,
+  makeTabs,
 } from './services'
 
 export const HttpLive = Layer.succeed(Http, makeHttp(fetch))
@@ -82,27 +78,7 @@ export const DebugLive = Layer.succeed(
   }),
 )
 
-export const TabsLive = Layer.succeed(
-  Tabs,
-  Tabs.of({
-    activeTab: () =>
-      Effect.tryPromise({
-        try: async () => {
-          const [tab] = await browser.tabs.query({ active: true, currentWindow: true })
-          return {
-            ...(tab?.id !== undefined ? { id: tab.id } : {}),
-            ...(tab?.url !== undefined ? { url: tab.url } : {}),
-          }
-        },
-        catch: (cause) => new IpcError({ reason: String(cause) }),
-      }),
-    sendMessage: (tabId, msg) =>
-      Effect.tryPromise({
-        try: () => browser.tabs.sendMessage(tabId, msg),
-        catch: (cause) => new IpcError({ reason: String(cause) }),
-      }),
-  }),
-)
+export const TabsLive = Layer.succeed(Tabs, Tabs.of(makeTabs(browser.tabs)))
 
 export const DomTabsLive = Layer.succeed(DomTabs, DomTabs.of(makeDomTabs(browser.tabs)))
 
@@ -133,14 +109,7 @@ export const PorterClientLive = Layer.succeed(
           try: () => browser.runtime.sendMessage(msg) as Promise<PorterReply<K>>,
           catch: (cause) => new IpcError({ reason: String(cause) }),
         })
-        if (!reply.ok) {
-          return yield* Effect.fail(new IpcError({ reason: reply.error }))
-        }
-        const { ok: _ok, ...payload } = reply
-        // Documented cast: TS can't carry the `Omit<..., 'ok'>` shape through the
-        // generic `K` back to `PorterResponseMap[K]` — this is the only remaining
-        // cast on the popup↔background wire (the transport cast above is the other).
-        return payload as unknown as PorterResponseMap[K]
+        return yield* unwrapPorterReply(reply)
       }),
   }),
 )

@@ -1,7 +1,10 @@
 import { assert, describe, it } from '@effect/vitest'
 import { Effect, Layer } from 'effect'
+import realMixPanel from '../adapters/youtube/fixture-mix-panel.json'
 import { alarmsTest, debugLogTest, httpTest, kvTest } from '../fx/testing'
+import { QUEUE_ALARM } from '../queue/queue'
 import { loadQueue } from '../queue/store'
+import { contentHash } from '../store/ledger'
 import { loadWatches } from './store'
 import { resyncOneDueWatch } from './resync'
 import { emptyWatches, upsertWatch, WATCH_ALARM } from './watch'
@@ -32,9 +35,10 @@ function layer(
   watches = dueWatch(),
   http: Record<string, string | string[]> = { [HN_API_URL]: JSON.stringify(HN_ITEM) },
   alarmCalls: Array<[string, number | 'clear']> = [],
+  ledger: Record<string, unknown> = {},
 ) {
   return Layer.mergeAll(
-    kvTest({ 'porter/watch/v1': watches }),
+    kvTest({ 'porter/watch/v1': watches, 'porter/ledger': ledger }),
     debugLogTest(),
     httpTest(http),
     alarmsTest({
@@ -45,6 +49,37 @@ function layer(
       },
     }),
   )
+}
+
+// Mix playlist fixture — the one multi-unit doc kind (overview + per-video
+// units) available without a continuation-walk, so a single resync tick can
+// produce a genuinely mixed pending/synced batch.
+const MIX_URL = 'https://www.youtube.com/watch?v=9UZKYgqcY8U&list=RD9UZKYgqcY8U&start_radio=1'
+const MIX_FETCH_URL = 'https://www.youtube.com/watch?v=9UZKYgqcY8U&list=RD9UZKYgqcY8U'
+const MIX_DOC_ID = 'youtube:RD9UZKYgqcY8U'
+const MIX_VIDEO_IDS = ['9UZKYgqcY8U', 'ArmDp-zijuc', 'Km71Rr9K-Bw']
+
+function mixHtml(): string {
+  return `<html><body><script>
+    var ytInitialData = ${JSON.stringify(realMixPanel)};
+  </script></body></html>`
+}
+
+function mixWatch() {
+  return upsertWatch(emptyWatches(), {
+    sourceDocId: MIX_DOC_ID,
+    sourceUrl: MIX_URL,
+    target,
+    now: EARLIER,
+  })
+}
+
+/** youtube ingest units hash the canonical watch URL — deterministic, no capture needed. */
+function videoUnitId(videoId: string): string {
+  return `youtube:${videoId}`
+}
+function videoContentHash(videoId: string): string {
+  return contentHash(`https://www.youtube.com/watch?v=${videoId}`)
 }
 
 describe('resyncOneDueWatch', () => {
@@ -106,6 +141,91 @@ describe('resyncOneDueWatch', () => {
 
       assert.deepStrictEqual(result, { status: 'idle' })
       assert.isTrue(alarms.some(([name]) => name === WATCH_ALARM))
+    }),
+  )
+})
+
+describe('resyncOneDueWatch — ledger dedup', () => {
+  it.effect(
+    'skips enqueue and the queue alarm when every recaptured unit is already receipted',
+    () =>
+      Effect.gen(function* () {
+        // Learn the unit's stable contentHash from an ordinary (unseeded) resync.
+        const probeLayer = layer(dueWatch())
+        yield* resyncOneDueWatch({ now: NOW }).pipe(Effect.provide(probeLayer))
+        const probed = yield* loadQueue().pipe(Effect.provide(probeLayer))
+        const unit = probed.jobs[0]?.unit
+        if (unit === undefined) throw new Error('expected a probed unit')
+
+        const alarms: Array<[string, number | 'clear']> = []
+        const ledger = {
+          [target.notebookId]: {
+            [unit.id]: { contentHash: unit.contentHash, lastSynced: EARLIER },
+          },
+        }
+        const testLayer = layer(dueWatch(), undefined, alarms, ledger)
+        const result = yield* resyncOneDueWatch({ now: NOW }).pipe(Effect.provide(testLayer))
+
+        assert.deepStrictEqual(result, {
+          status: 'queued',
+          watchId: firstWatchId(dueWatch()),
+          docId: 'hackernews:42',
+        })
+        const queue = yield* loadQueue().pipe(Effect.provide(testLayer))
+        assert.strictEqual(queue.jobs.length, 0)
+        assert.isFalse(alarms.some(([name]) => name === QUEUE_ALARM))
+        const watches = yield* loadWatches().pipe(Effect.provide(testLayer))
+        assert.strictEqual(watches.watches[0]?.lastResyncedAt, NOW)
+      }),
+  )
+
+  it.effect('enqueues only the units not already receipted, from a mixed playlist batch', () =>
+    Effect.gen(function* () {
+      const [syncedVideoId, pendingVideoIdA, pendingVideoIdB] = MIX_VIDEO_IDS
+      if (
+        syncedVideoId === undefined ||
+        pendingVideoIdA === undefined ||
+        pendingVideoIdB === undefined
+      ) {
+        throw new Error('expected three fixture video ids')
+      }
+      const ledger = {
+        [target.notebookId]: {
+          [videoUnitId(syncedVideoId)]: {
+            contentHash: videoContentHash(syncedVideoId),
+            lastSynced: EARLIER,
+          },
+        },
+      }
+      const alarms: Array<[string, number | 'clear']> = []
+      const testLayer = Layer.mergeAll(
+        kvTest({ 'porter/watch/v1': mixWatch(), 'porter/ledger': ledger }),
+        debugLogTest(),
+        httpTest({ [MIX_FETCH_URL]: mixHtml() }),
+        alarmsTest({
+          onSchedule: (name, when) => alarms.push([name, when]),
+          onClear: (name) => {
+            alarms.push([name, 'clear'])
+            return true
+          },
+        }),
+      )
+
+      const result = yield* resyncOneDueWatch({ now: NOW }).pipe(Effect.provide(testLayer))
+      assert.strictEqual(result.status, 'queued')
+
+      const queue = yield* loadQueue().pipe(Effect.provide(testLayer))
+      const queuedUnitIds = queue.jobs.map((job) => job.unit.id).toSorted()
+      assert.deepStrictEqual(
+        queuedUnitIds,
+        [
+          `${MIX_DOC_ID}:toc`,
+          videoUnitId(pendingVideoIdA),
+          videoUnitId(pendingVideoIdB),
+        ].toSorted(),
+      )
+      assert.isFalse(queuedUnitIds.includes(videoUnitId(syncedVideoId)))
+      assert.isTrue(alarms.some(([name]) => name === QUEUE_ALARM))
     }),
   )
 })

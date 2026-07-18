@@ -12,7 +12,7 @@ import {
 } from './fx/testing'
 import { buildRpcUrl, createNotebookParams, homeUrl, RPC_IDS } from './ingest/rpc/protocol'
 import type { SourceDoc } from './model/types'
-import { handlePorterMessage } from './router'
+import { domainsForMessage, handlePorterMessage, MESSAGE_DOMAINS } from './router'
 import { DEFAULT_SETTINGS } from './settings'
 
 /** Byte-count line + JSON-array-chunk line, alternating, per the real rt=c format. */
@@ -97,7 +97,7 @@ describe('handlePorterMessage', () => {
         assert.deepStrictEqual(reply, {
           ok: true,
           capturable: 'Capture this playlist',
-          canEnrichYoutube: true,
+          canEnrichTranscripts: true,
         })
       }),
     )
@@ -271,7 +271,7 @@ describe('handlePorterMessage', () => {
     )
   })
 
-  describe('porter/capture-url (contentScript adapter)', () => {
+  describe('porter/capture-url (content-script adapter)', () => {
     it.effect('relays extract-thread to the tab for an X status URL and stores the doc', () =>
       Effect.gen(function* () {
         const capture = {
@@ -939,4 +939,52 @@ describe('handlePorterMessage', () => {
       })
     }),
   )
+})
+
+describe('domainsForMessage / MESSAGE_DOMAINS', () => {
+  it('orders a multi-domain entry by LANE_ORDER regardless of authoring order', () => {
+    assert.deepStrictEqual(domainsForMessage('porter/queue-enqueue'), ['queue', 'settings'])
+  })
+
+  it('preserves the pre-existing docs+watches lane pairing for delete-doc', () => {
+    assert.deepStrictEqual(domainsForMessage('porter/delete-doc'), ['docs', 'watches'])
+  })
+
+  it('returns [] for an unknown wire type', () => {
+    assert.deepStrictEqual(domainsForMessage('porter/nonsense'), [])
+  })
+
+  it('is exhaustive over every PorterMessage variant', () => {
+    // Canonical list of PorterMessage['type'] values, mirrored from messaging.ts.
+    // MESSAGE_DOMAINS' mapped type already forces this 1:1 at compile time —
+    // this is the runtime smoke check that nobody silently deleted an entry.
+    const messageTypes = [
+      'porter/detect',
+      'porter/capture-url',
+      'porter/capture-page',
+      'porter/capture-result',
+      'porter/list-docs',
+      'porter/delete-doc',
+      'porter/export',
+      'porter/queue-enqueue',
+      'porter/queue-status',
+      'porter/queue-retry',
+      'porter/watch-create',
+      'porter/watch-list',
+      'porter/watch-remove',
+      'porter/list-notebooks',
+      'porter/create-notebook',
+      'porter/nblm-scan-console',
+      'porter/nblm-dedupe',
+      'porter/nblm-retry-source',
+      'porter/accounts-refresh',
+      'porter/get-settings',
+      'porter/update-settings',
+      'porter/backup-drive',
+      'porter/debug-log',
+      'porter/debug-clear',
+    ]
+    assert.strictEqual(Object.keys(MESSAGE_DOMAINS).length, messageTypes.length)
+    assert.deepStrictEqual(Object.keys(MESSAGE_DOMAINS).toSorted(), messageTypes.toSorted())
+  })
 })

@@ -9,7 +9,10 @@ import {
   retryJob,
   settleRetryableFailure,
   settleTerminalFailure,
+  summarizeQueue,
   supersedePendingUnitVersions,
+  type QueueJobView,
+  type QueueSnapshot,
 } from './queue'
 
 const NOW = '2026-07-11T00:00:00.000Z'
@@ -169,5 +172,81 @@ describe('ingest queue', () => {
     expect(reEnqueued.jobs[0]?.attempts).toBe(0)
     expect(reEnqueued.jobs[0]?.lastError).toBeUndefined()
     expect(reEnqueued.jobs[0]?.docIds).toEqual(['reddit:1', 'reddit:2'])
+  })
+})
+
+function jobView(overrides: Partial<QueueJobView> = {}): QueueJobView {
+  return {
+    id: 'job-1',
+    docIds: ['reddit:1'],
+    unitId: 'reddit:1',
+    status: 'queued',
+    attempts: 0,
+    ...overrides,
+  }
+}
+
+describe('summarizeQueue', () => {
+  it('returns undefined for an empty snapshot', () => {
+    expect(summarizeQueue({ jobs: [] })).toBeUndefined()
+  })
+
+  it('counts queued, retrying, and inFlight jobs as queued', () => {
+    const snapshot: QueueSnapshot = {
+      jobs: [
+        jobView({ id: 'a', status: 'queued' }),
+        jobView({ id: 'b', status: 'retrying' }),
+        jobView({ id: 'c', status: 'inFlight' }),
+      ],
+    }
+    const summary = summarizeQueue(snapshot)
+    expect(summary?.queued).toBe(3)
+    expect(summary?.failed).toBe(0)
+    expect(summary?.uncertain).toBe(0)
+    expect(summary?.blocked).toBe(0)
+  })
+
+  it('reports mixed status counts', () => {
+    const snapshot: QueueSnapshot = {
+      jobs: [
+        jobView({ id: 'a', status: 'queued' }),
+        jobView({ id: 'b', status: 'failed' }),
+        jobView({ id: 'c', status: 'uncertain' }),
+        jobView({ id: 'd', status: 'blocked' }),
+      ],
+    }
+    const summary = summarizeQueue(snapshot)
+    expect(summary).toMatchObject({ queued: 1, failed: 1, uncertain: 1, blocked: 1 })
+  })
+
+  it('collects failed and uncertain job ids into retryJobIds, in job order', () => {
+    const snapshot: QueueSnapshot = {
+      jobs: [
+        jobView({ id: 'a', status: 'queued' }),
+        jobView({ id: 'b', status: 'failed' }),
+        jobView({ id: 'c', status: 'blocked' }),
+        jobView({ id: 'd', status: 'uncertain' }),
+      ],
+    }
+    expect(summarizeQueue(snapshot)?.retryJobIds).toEqual(['b', 'd'])
+  })
+
+  it('surfaces the first retryable job lastError as the summary error', () => {
+    const snapshot: QueueSnapshot = {
+      jobs: [
+        jobView({ id: 'a', status: 'failed', lastError: 'network down' }),
+        jobView({ id: 'b', status: 'uncertain', lastError: 'ambiguous result' }),
+      ],
+    }
+    expect(summarizeQueue(snapshot)?.error).toBe('network down')
+  })
+
+  it('omits the error key when the first retryable job has no lastError', () => {
+    const snapshot: QueueSnapshot = {
+      jobs: [jobView({ id: 'a', status: 'failed' })],
+    }
+    const summary = summarizeQueue(snapshot)
+    expect(summary).toBeDefined()
+    expect('error' in (summary ?? {})).toBe(false)
   })
 })

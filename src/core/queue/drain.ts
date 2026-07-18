@@ -20,13 +20,7 @@ import {
   routeForTierA,
   saveTierState,
 } from '../ingest/tier-state'
-import {
-  diffAgainstLedger,
-  loadLedger,
-  recordSynced,
-  saveLedger,
-  type Ledger,
-} from '../store/ledger'
+import { isUnitSynced, loadLedger, recordSynced, saveLedger, type Ledger } from '../store/ledger'
 import {
   QUEUE_ALARM,
   markInFlight,
@@ -85,7 +79,7 @@ export function classifyQueueFailure(failure: QueueFailure): QueueFailureDisposi
 function removeReceiptedJobs(queue: QueueState, ledger: Ledger): QueueState {
   let next = queue
   for (const job of queue.jobs) {
-    if (diffAgainstLedger(ledger, job.target.notebookId, [job.unit]).unchanged.length > 0) {
+    if (isUnitSynced(ledger, job.target.notebookId, job.unit)) {
       next = removeJob(next, job.id)
     }
   }
@@ -367,7 +361,7 @@ export function drainQueue(
       // Dedup insurance: if this unit was receipted since the burst began (or a
       // stale re-enqueue slipped past removeReceiptedJobs), drop it unsent so a
       // succeeded source is never created twice.
-      if (diffAgainstLedger(ledger, job.target.notebookId, [job.unit]).unchanged.length > 0) {
+      if (isUnitSynced(ledger, job.target.notebookId, job.unit)) {
         queue = removeJob(queue, job.id)
         yield* saveQueue(queue)
         yield* debugLog.log('queue', 'skip already-synced', {}, { run })

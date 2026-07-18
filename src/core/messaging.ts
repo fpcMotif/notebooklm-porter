@@ -1,5 +1,6 @@
 import { Context, Effect } from 'effect'
 import type { NblmAccount } from './accounts/parse'
+import type { CaptureOptions } from './adapters/types'
 import type { BackupOutcome } from './backup/client'
 import type { DebugEntry } from './debug'
 import { IpcError } from './fx/errors'
@@ -19,7 +20,7 @@ export type PorterMessage =
   /** Popup asks: what can the active tab capture, and what's already stored? */
   | { type: 'porter/detect'; url: string }
   /** Popup asks the background to capture the given tab's URL (URL-capturable sites). */
-  | { type: 'porter/capture-url'; url: string; tabId: number; enrichYoutube?: true }
+  | { type: 'porter/capture-url'; url: string; tabId: number; options?: CaptureOptions }
   /** Popup asks the X content script (via background relay) to extract the open thread. */
   | { type: 'porter/capture-page'; tabId: number }
   /** A content script delivers an extracted capture. */
@@ -70,7 +71,7 @@ export type NotebookMeta = { id: string; title: string }
 
 /** Per-message success payloads — the single source of truth for both sides of the wire. */
 export interface PorterResponseMap {
-  'porter/detect': { capturable?: string; canEnrichYoutube?: true }
+  'porter/detect': { capturable?: string; canEnrichTranscripts?: true }
   'porter/capture-url': { docs: SourceDoc[] }
   'porter/capture-page': { docs: SourceDoc[] }
   'porter/capture-result': { docs: SourceDoc[] }
@@ -148,3 +149,18 @@ export interface PorterClientShape {
 export class PorterClient extends Context.Service<PorterClient, PorterClientShape>()(
   'porter/PorterClient',
 ) {}
+
+/** Turns a wire-level `PorterReply` into its typed payload or a failure. */
+export function unwrapPorterReply<K extends PorterMessage['type']>(
+  reply: PorterReply<K>,
+): Effect.Effect<PorterResponseMap[K], IpcError> {
+  if (!reply.ok) {
+    return Effect.fail(new IpcError({ reason: reply.error }))
+  }
+  const { ok: _ok, ...payload } = reply
+  // Documented cast: TS can't carry the `Omit<..., 'ok'>` shape through the
+  // generic `K` back to `PorterResponseMap[K]` — this is the only remaining
+  // cast on the popup↔background wire (the transport cast in PorterClientLive
+  // is the other).
+  return Effect.succeed(payload as unknown as PorterResponseMap[K])
+}

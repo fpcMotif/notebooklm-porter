@@ -1,7 +1,8 @@
 import { assert, describe, it } from '@effect/vitest'
 import { Effect, Layer } from 'effect'
 import { FetchError, HttpStatusError, ProtocolDrift } from '../fx/errors'
-import { Alarms, DebugLog, DomTabs, Http, Kv, type HttpInit } from '../fx/services'
+import { Http, type HttpInit } from '../fx/services'
+import { alarmsTest, debugLogTest, domTabsTest, kvTest } from '../fx/testing'
 import type { DomDeliveryRequest, DomDeliveryResult } from '../ingest/dom/contracts'
 import { TIER_STATE_STORAGE_KEY, type TierState } from '../ingest/tier-state'
 import type { IngestUnit } from '../ingest/units'
@@ -74,17 +75,10 @@ function runtime(
   let sessionCalls = 0
   const domRequests: DomDeliveryRequest[] = []
 
-  const kv = Layer.succeed(
-    Kv,
-    Kv.of({
-      get: <T>(key: string) => Effect.sync(() => values.get(key) as T | undefined),
-      set: <T>(key: string, value: T) =>
-        Effect.sync(() => {
-          values.set(key, value)
-          writes.push({ key, value })
-        }),
-    }),
-  )
+  const kv = kvTest(values, writes)
+  // Bespoke RPC/session simulator (dispatches on method + RPC id embedded in
+  // the POST body, plus authuser-scoped GET), not a static URL→body map —
+  // doesn't fit httpTest's shape, so it stays local.
   const http = Layer.succeed(
     Http,
     Http.of({
@@ -112,44 +106,28 @@ function runtime(
       json: () => Effect.die('not used'),
     }),
   )
-  const debug = Layer.succeed(
-    DebugLog,
-    DebugLog.of({
-      log: () => Effect.void,
-      entries: () => Effect.succeed([]),
-      clear: () => Effect.void,
-    }),
-  )
-  const alarmsLayer = Layer.succeed(
-    Alarms,
-    Alarms.of({
-      schedule: (name, when) =>
-        Effect.sync(() => {
-          alarms.push({ type: 'schedule', name, when })
-        }),
-      clear: (name) =>
-        Effect.sync(() => {
-          alarms.push({ type: 'clear', name })
-          return true
-        }),
-    }),
-  )
-  const domTabs = Layer.succeed(
-    DomTabs,
-    DomTabs.of({
-      available: opts.domAvailable ?? false,
-      deliver: (request) =>
-        Effect.sync(() => {
-          domRequests.push(request)
-          return (
-            opts.domResult ?? {
-              status: 'unavailable' as const,
-              reason: 'DOM test adapter was not configured',
-            }
-          )
-        }),
-    }),
-  )
+  const debug = debugLogTest()
+  const alarmsLayer = alarmsTest({
+    onSchedule: (name, when) => {
+      alarms.push({ type: 'schedule', name, when })
+    },
+    onClear: (name) => {
+      alarms.push({ type: 'clear', name })
+      return true
+    },
+  })
+  const domTabs = domTabsTest({
+    available: opts.domAvailable ?? false,
+    onDeliver: (request) => {
+      domRequests.push(request)
+      return (
+        opts.domResult ?? {
+          status: 'unavailable' as const,
+          reason: 'DOM test adapter was not configured',
+        }
+      )
+    },
+  })
 
   return {
     alarms,

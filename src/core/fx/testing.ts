@@ -5,10 +5,13 @@
  */
 import { Effect, Layer } from 'effect'
 import type { DebugEntry } from '../debug'
-import { DriveAuthError, IpcError } from './errors'
+import type { DomDeliveryRequest, DomDeliveryResult } from '../ingest/dom/contracts'
+import { PorterClient, unwrapPorterReply, type PorterMessage, type PorterReply } from '../messaging'
+import { DriveAuthError, FetchError, HttpStatusError, IpcError } from './errors'
 import {
   Alarms,
   DebugLog,
+  DomTabs,
   Http,
   type HttpInit,
   Identity,
@@ -18,13 +21,32 @@ import {
   makeHttp,
 } from './services'
 
-export function kvTest(seed: Record<string, unknown> = {}) {
-  const store = new Map(Object.entries(seed))
+export interface RecordedKvWrite {
+  key: string
+  value: unknown
+}
+
+/**
+ * `seed` is normally a plain record (the store stays private to the test).
+ * Pass a `Map` instead when the test needs to read the store back after the
+ * effect runs — `kvTest` mutates it in place rather than copying it, mirroring
+ * how a caller-held `writes` sink (httpTest's `requests` pattern) records
+ * every `set` in call order.
+ */
+export function kvTest(
+  seed: Record<string, unknown> | Map<string, unknown> = {},
+  writes: RecordedKvWrite[] = [],
+) {
+  const store = seed instanceof Map ? seed : new Map(Object.entries(seed))
   return Layer.succeed(
     Kv,
     Kv.of({
       get: <T>(key: string) => Effect.sync(() => store.get(key) as T | undefined),
-      set: (key, value) => Effect.sync(() => void store.set(key, value)),
+      set: (key, value) =>
+        Effect.sync(() => {
+          store.set(key, value)
+          writes.push({ key, value })
+        }),
     }),
   )
 }
@@ -141,6 +163,75 @@ export function identityTest(redirectResult?: string) {
         redirectResult !== undefined
           ? Effect.succeed(redirectResult)
           : Effect.fail(new DriveAuthError({ reason: 'cancelled' })),
+    }),
+  )
+}
+
+export function domTabsTest(
+  opts: {
+    available?: boolean
+    onDeliver?: (request: DomDeliveryRequest) => DomDeliveryResult
+  } = {},
+) {
+  return Layer.succeed(
+    DomTabs,
+    DomTabs.of({
+      available: opts.available ?? false,
+      deliver: (request) =>
+        Effect.sync(
+          () =>
+            opts.onDeliver?.(request) ?? {
+              status: 'unavailable',
+              reason: 'domTabsTest: no onDeliver configured',
+            },
+        ),
+    }),
+  )
+}
+
+/**
+ * Full control over `Http.text` via a handler, for RPC-shaped tests that need
+ * per-call status codes, a hang (`Effect.never`), or a call counter — things
+ * `httpTest`'s static URL→body map can't express. `json` is unused by these
+ * callers, so it dies loudly if ever invoked.
+ */
+export function httpHandlerTest(
+  handler: (url: string, init?: HttpInit) => Effect.Effect<string, FetchError | HttpStatusError>,
+) {
+  return Layer.succeed(
+    Http,
+    Http.of({
+      text: handler,
+      json: () => Effect.die('httpHandlerTest: json() not configured'),
+    }),
+  )
+}
+
+type PorterClientHandlers = {
+  [K in PorterMessage['type']]?: (msg: Extract<PorterMessage, { type: K }>) => PorterReply<K>
+}
+
+/**
+ * Drives `PorterClient.request` from a per-message-type handler map of
+ * canned replies, reusing `unwrapPorterReply` so ok:false/ok:true behave
+ * exactly like the live client. A message type with no configured handler
+ * fails loudly rather than hanging, so a missing case shows up immediately.
+ */
+export function porterClientTest(handlers: PorterClientHandlers = {}) {
+  return Layer.succeed(
+    PorterClient,
+    PorterClient.of({
+      request: <K extends PorterMessage['type']>(msg: Extract<PorterMessage, { type: K }>) => {
+        const handler = handlers[msg.type as K]
+        if (handler === undefined) {
+          return Effect.fail(
+            new IpcError({ reason: `porterClientTest: no handler configured for ${msg.type}` }),
+          )
+        }
+        // Documented cast: TS can't carry the handler's own K, resolved by
+        // indexing `handlers` above, back through to this call site's K.
+        return unwrapPorterReply(handler(msg))
+      },
     }),
   )
 }

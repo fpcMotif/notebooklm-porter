@@ -4,7 +4,7 @@ import type { PorterError, StorageError } from '../fx/errors'
 import { DebugLog, Http, Scripting, type Kv } from '../fx/services'
 import { formatCapture } from '../format/format'
 import type { Capture, SourceDoc } from '../model/types'
-import { upsertDoc } from '../store'
+import { storeCapturedDoc } from '../store'
 import { createWebCapture } from './capture'
 
 export const CONTEXT_MENU_IDS = {
@@ -28,9 +28,9 @@ export function isContextMenuId(value: unknown): value is ContextMenuId {
   return Object.values(CONTEXT_MENU_IDS).includes(value as ContextMenuId)
 }
 
-function storeCapture(capture: Capture): Effect.Effect<SourceDoc, StorageError, Kv> {
+function storeCapture(capture: Capture): Effect.Effect<SourceDoc, StorageError, DebugLog | Kv> {
   const doc = formatCapture(capture)
-  return upsertDoc(doc).pipe(Effect.as(doc))
+  return storeCapturedDoc(doc).pipe(Effect.as(doc))
 }
 
 function genericLinkCapture(click: ContextMenuClick): Capture | undefined {
@@ -90,10 +90,9 @@ function adapterLinkCapture(
   linkUrl: string,
 ): Effect.Effect<SourceDoc | undefined, PorterError, Http | DebugLog | Kv> {
   const adapter = adapterForUrl(linkUrl)
-  const captureFromUrl = adapter?.contentScript ? undefined : adapter?.captureFromUrl
-  if (captureFromUrl === undefined || adapter?.detect(linkUrl) === null)
+  if (adapter === undefined || adapter.strategy.mode !== 'url' || adapter.detect(linkUrl) === null)
     return Effect.succeed(undefined)
-  return captureFromUrl(linkUrl).pipe(Effect.flatMap(storeCapture))
+  return adapter.strategy.capture(linkUrl).pipe(Effect.flatMap(storeCapture))
 }
 
 /**

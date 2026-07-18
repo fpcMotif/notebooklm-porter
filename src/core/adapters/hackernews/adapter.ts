@@ -13,7 +13,7 @@ export const hackernewsAdapter: SourceAdapter = {
     }
     return null
   },
-  captureFromUrl: captureHnThread,
+  strategy: { mode: 'url', capture: captureHnThread },
 }
 
 function safeUrl(url: string): URL | null {
