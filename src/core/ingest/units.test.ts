@@ -243,3 +243,62 @@ Body`
     expect(contentHashForIngest(`${later}\nChanged`)).not.toBe(contentHashForIngest(later))
   })
 })
+
+// Characterisation: hex values below were computed by running
+// contentHashForIngest against the pre-refactor implementation (the
+// frontmatter scan inlined in units.ts, before it moved to the shared
+// frontmatter.ts module). A changed hash here means resync would silently
+// re-ingest every existing ledgered source, so these are hard-pinned.
+describe('contentHashForIngest — frozen pre-refactor characterisation', () => {
+  const withFrontmatterAndCapturedAt = `---
+source: web
+url: https://example.com
+captured_at: 2026-07-11T00:00:00.000Z
+---
+
+# Title
+
+Body text here.`
+
+  const noFrontmatter = `# Just a body
+
+No frontmatter at all.`
+
+  const frontmatterWithoutCapturedAt = `---
+source: web
+url: https://example.com
+---
+
+# Title
+
+Body text here.`
+
+  const sameDocDifferentCapturedAt = `---
+source: web
+url: https://example.com
+captured_at: 2026-07-12T00:00:00.000Z
+---
+
+# Title
+
+Body text here.`
+
+  it('hashes markdown with frontmatter including a captured_at line', () => {
+    expect(contentHashForIngest(withFrontmatterAndCapturedAt)).toBe('76ce68c7')
+  })
+
+  it('hashes markdown with no frontmatter at all', () => {
+    expect(contentHashForIngest(noFrontmatter)).toBe('d045f390')
+  })
+
+  it('hashes frontmatter that never had a captured_at line the same as one with it stripped', () => {
+    expect(contentHashForIngest(frontmatterWithoutCapturedAt)).toBe('76ce68c7')
+  })
+
+  it('hashes the same doc identically regardless of captured_at value', () => {
+    expect(contentHashForIngest(sameDocDifferentCapturedAt)).toBe('76ce68c7')
+    expect(contentHashForIngest(sameDocDifferentCapturedAt)).toBe(
+      contentHashForIngest(withFrontmatterAndCapturedAt),
+    )
+  })
+})
