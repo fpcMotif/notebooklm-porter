@@ -3,6 +3,9 @@ import { webToMarkdown } from './web'
 
 describe('webToMarkdown', () => {
   it('renders explicit web source and capture-mode metadata', () => {
+    // Now routed through the shared frontmatterBlock (frontmatter.ts):
+    // captured_at is a yamlScalar like every other writer, so its hyphens
+    // now trigger quoting. Previously emitted unquoted via string interpolation.
     expect(
       webToMarkdown(
         {
@@ -19,7 +22,7 @@ source: web
 url: "https://example.com/article"
 title: An article
 capture_mode: page
-captured_at: 2026-07-11T00:00:00.000Z
+captured_at: "2026-07-11T00:00:00.000Z"
 ---
 
 # An article
