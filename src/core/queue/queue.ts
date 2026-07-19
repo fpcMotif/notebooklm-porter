@@ -316,6 +316,25 @@ export function summarizeQueue(snapshot: QueueSnapshot): QueueSummary | undefine
   }
 }
 
+/**
+ * Badge-facing tallies (design: the action badge only needs "trouble" vs
+ * "busy", not the full status breakdown). `failed` bundles every status
+ * that needs human review (failed, blocked, uncertain); `queued` bundles
+ * everything still moving on its own (queued, retrying, inFlight).
+ */
+export function queueCounts(state: QueueState): { queued: number; failed: number } {
+  let queued = 0
+  let failed = 0
+  for (const job of state.jobs) {
+    if (job.status === 'failed' || job.status === 'blocked' || job.status === 'uncertain') {
+      failed++
+    } else {
+      queued++
+    }
+  }
+  return { queued, failed }
+}
+
 export function nextDueAt(state: QueueState, now: string): string | undefined {
   const retryTimes = state.jobs
     .filter((job) => job.status === 'retrying' && job.nextAttemptAt !== undefined)

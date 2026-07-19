@@ -5,11 +5,13 @@ import {
   enqueueUnits,
   markInFlight,
   pickNext,
+  queueCounts,
   queueSnapshot,
   reapInterrupted,
   retryJob,
   settleRetryableFailure,
   settleTerminalFailure,
+  settleUncertain,
   summarizeQueue,
   supersedePendingUnitVersions,
   type QueueJobView,
@@ -334,5 +336,54 @@ describe('summarizeQueue', () => {
     const summary = summarizeQueue(snapshot)
     expect(summary).toBeDefined()
     expect('error' in (summary ?? {})).toBe(false)
+  })
+})
+
+describe('queueCounts', () => {
+  it('is zero for an empty queue', () => {
+    expect(queueCounts(emptyQueue())).toEqual({ queued: 0, failed: 0 })
+  })
+
+  it('counts queued/retrying/inFlight jobs as "queued"', () => {
+    const queued = enqueueUnits(emptyQueue(), target, [unit()], NOW)
+    expect(queueCounts(queued)).toEqual({ queued: 1, failed: 0 })
+
+    const inFlight = markInFlight(queued, queued.jobs[0]?.id ?? '', NOW)
+    expect(queueCounts(inFlight)).toEqual({ queued: 1, failed: 0 })
+
+    const retrying = settleRetryableFailure(queued, queued.jobs[0]?.id ?? '', 'network blip', NOW)
+    expect(queueCounts(retrying)).toEqual({ queued: 1, failed: 0 })
+  })
+
+  it('counts failed/blocked/uncertain jobs as "failed"', () => {
+    const base = enqueueUnits(emptyQueue(), target, [unit()], NOW)
+    const jobId = base.jobs[0]?.id ?? ''
+
+    expect(queueCounts(settleTerminalFailure(base, jobId, 'refused', NOW))).toEqual({
+      queued: 0,
+      failed: 1,
+    })
+    expect(queueCounts(settleTerminalFailure(base, jobId, 'blocked', NOW, 'blocked'))).toEqual({
+      queued: 0,
+      failed: 1,
+    })
+    expect(queueCounts(settleUncertain(base, jobId, 'unknown', NOW))).toEqual({
+      queued: 0,
+      failed: 1,
+    })
+  })
+
+  it('tallies a mix of statuses across jobs', () => {
+    const first = enqueueUnits(emptyQueue(), target, [unit()], NOW)
+    const withSecond = enqueueUnits(
+      first,
+      secondTarget,
+      [unit({ docId: 'reddit:2', id: 'reddit:2' })],
+      NOW,
+    )
+    const secondJobId = withSecond.jobs[1]?.id ?? ''
+    const mixed = settleTerminalFailure(withSecond, secondJobId, 'refused', NOW)
+
+    expect(queueCounts(mixed)).toEqual({ queued: 1, failed: 1 })
   })
 })

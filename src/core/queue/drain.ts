@@ -20,6 +20,7 @@ import { sendIngestUnit } from '../ingest/notebooklm'
 import { listNotebooks, listSources } from '../ingest/rpc/client'
 import { reconcileUnits } from '../ingest/sources/reconcile'
 import type { NotebookSource } from '../ingest/sources/model'
+import { emptyDrainBurstCounts, type DrainBurstCounts } from '../notify/notify'
 import {
   degradeForPreflightDrift,
   degradedUntil,
@@ -51,13 +52,22 @@ export type QueueFailureDisposition =
   | { status: 'failed'; error: string }
   | { status: 'blocked'; error: string }
 
-export type DrainResult =
+/** The last processed job's disposition — `DrainResult` minus the burst-wide `counts`. */
+type DrainOutcome =
   | { status: 'idle' }
   | { status: 'sent'; jobId: string }
   | { status: 'retrying'; jobId: string }
   | { status: 'uncertain'; jobId: string }
   | { status: 'failed'; jobId: string }
   | { status: 'blocked'; jobId: string }
+
+/**
+ * `counts` tallies every job disposition across the WHOLE burst (not just
+ * the last one) — the drain-outcome notification (design item 4) summarizes
+ * from this rather than re-deriving it from queue state, which would blur
+ * this burst's outcomes with jobs left over from an earlier one.
+ */
+export type DrainResult = DrainOutcome & { counts: DrainBurstCounts }
 
 function accountBindingKey(binding: NotebookLmAccountBinding): string {
   return JSON.stringify([binding.authuser, binding.accountEmail])
@@ -180,7 +190,9 @@ function settleSourceListingFailure(
  * killed mid-burst loses at most the single in-flight unit.
  *
  * Returns the last processed job's disposition (or `idle`), so a single-job
- * queue behaves exactly as the previous one-step function did.
+ * queue behaves exactly as the previous one-step function did, plus
+ * `counts`: every disposition tallied across the whole burst, for the
+ * drain-outcome notification.
  */
 export function drainQueue(
   opts: { now?: string } = {},
@@ -218,7 +230,11 @@ export function drainQueue(
     const sourcesByNotebook = new Map<string, NotebookSource[]>()
     const failedSourceListings = new Set<string>()
     let tierState = yield* loadTierState(Date.parse(now))
-    let lastResult: DrainResult = { status: 'idle' }
+    let lastResult: DrainOutcome = { status: 'idle' }
+    const counts = emptyDrainBurstCounts()
+    const bump = (status: Exclude<DrainOutcome['status'], 'idle'>) => {
+      counts[status]++
+    }
 
     // Each iteration removes a job or renders it non-due, so the due set
     // strictly shrinks; the bound is a defensive guard against a logic slip.
@@ -256,6 +272,7 @@ export function drainQueue(
           queue = settled.queue
           yield* saveQueue(queue)
           lastResult = { status: settled.status, jobId: job.id }
+          bump(settled.status)
           break // session unreachable applies to every remaining job — stop the burst
         }
         authentication = accountResult.success
@@ -273,6 +290,7 @@ export function drainQueue(
         yield* debugLog.log('queue', 'account changed → blocked', {}, { run, level: 'error' })
         yield* saveQueue(queue)
         lastResult = { status: 'blocked', jobId: job.id }
+        bump('blocked')
         continue
       }
       const account = authentication.account
@@ -331,6 +349,7 @@ export function drainQueue(
               )
               yield* saveQueue(queue)
               lastResult = { status: 'blocked', jobId: job.id }
+              bump('blocked')
               continue
             } else {
               const isNetwork =
@@ -354,6 +373,7 @@ export function drainQueue(
               queue = settled.queue
               yield* saveQueue(queue)
               lastResult = { status: settled.status, jobId: job.id }
+              bump(settled.status)
               if (isNetwork) break // list unreachable applies to the whole account
               continue
             }
@@ -389,6 +409,7 @@ export function drainQueue(
           )
           yield* saveQueue(queue)
           lastResult = { status: 'blocked', jobId: job.id }
+          bump('blocked')
           continue
         }
       }
@@ -401,6 +422,7 @@ export function drainQueue(
         yield* saveQueue(queue)
         yield* debugLog.log('queue', 'skip already-synced', {}, { run })
         lastResult = { status: 'sent', jobId: job.id }
+        bump('sent')
         continue
       }
 
@@ -412,6 +434,7 @@ export function drainQueue(
         queue = settled.queue
         yield* saveQueue(queue)
         lastResult = { status: settled.status, jobId: job.id }
+        bump(settled.status)
         continue
       }
       let sources = sourcesByNotebook.get(job.target.notebookId)
@@ -436,6 +459,7 @@ export function drainQueue(
             )
             yield* saveQueue(queue)
             lastResult = { status: 'blocked', jobId: job.id }
+            bump('blocked')
             continue
           }
           const isNetwork =
@@ -453,6 +477,7 @@ export function drainQueue(
             queue = settled.queue
             yield* saveQueue(queue)
             lastResult = { status: settled.status, jobId: job.id }
+            bump(settled.status)
             continue
           }
           const settled = settleFailure(queue, job, sourcesResult.failure, now)
@@ -465,6 +490,7 @@ export function drainQueue(
           queue = settled.queue
           yield* saveQueue(queue)
           lastResult = { status: settled.status, jobId: job.id }
+          bump(settled.status)
           continue
         }
         sources = sourcesResult.success
@@ -489,6 +515,7 @@ export function drainQueue(
           { run },
         )
         lastResult = { status: 'sent', jobId: job.id }
+        bump('sent')
         continue
       }
 
@@ -524,6 +551,7 @@ export function drainQueue(
           queue = settled.queue
           yield* saveQueue(queue)
           lastResult = { status: settled.status, jobId: job.id }
+          bump(settled.status)
           continue
         }
       } else {
@@ -541,6 +569,7 @@ export function drainQueue(
           queue = settled.queue
           yield* saveQueue(queue)
           lastResult = { status: settled.status, jobId: job.id }
+          bump(settled.status)
           continue
         }
       }
@@ -553,9 +582,10 @@ export function drainQueue(
       yield* saveQueue(queue)
       yield* debugLog.log('queue', 'sent', { tier: useDom ? 'dom' : 'rpc' }, { run })
       lastResult = { status: 'sent', jobId: job.id }
+      bump('sent')
     }
 
     yield* armNextDrain(queue, now)
-    return lastResult
+    return { ...lastResult, counts }
   })
 }

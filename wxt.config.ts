@@ -27,7 +27,8 @@ export default defineConfig({
     // the 10MB storage.local quota once a few captures accumulate;
     // `clipboardWrite` backs the copy-as-markdown fallback ingest path;
     // `identity` backs the Drive backup OAuth flow (design §2); `alarms`
-    // wakes the MV3 worker to resume durable ingest work.
+    // wakes the MV3 worker to resume durable ingest work; `notifications`
+    // backs the drain-outcome summary toast.
     permissions: [
       'storage',
       'downloads',
@@ -38,7 +39,23 @@ export default defineConfig({
       'contextMenus',
       'activeTab',
       'scripting',
+      'notifications',
     ],
     host_permissions: [...allHostPermissions(), NOTEBOOKLM_HOST, DRIVE_HOST],
+    // Keyboard shortcut to capture the active tab without opening the popup.
+    commands: {
+      'capture-current-tab': {
+        suggested_key: {
+          default: 'Ctrl+Shift+S',
+          mac: 'Command+Shift+S',
+        },
+        description: 'Capture current tab into NotebookLM Porter',
+      },
+    },
+    // "nlm <url or query>" in the address bar: capture a URL or jump to a
+    // captured doc without opening the popup.
+    omnibox: {
+      keyword: 'nlm',
+    },
   },
 })

@@ -223,7 +223,10 @@ describe('drainQueue', () => {
 
       const result = yield* drainQueue({ now: NOW }).pipe(Effect.provide(fx.layer))
 
-      assert.deepStrictEqual(result, { status: 'idle' })
+      assert.deepStrictEqual(result, {
+        status: 'idle',
+        counts: { sent: 0, retrying: 0, failed: 0, blocked: 0, uncertain: 0 },
+      })
       assert.strictEqual(fx.sessionCalls(), 0)
       assert.strictEqual(fx.listCalls(), 0)
       assert.strictEqual(fx.posts(), 0)
@@ -239,6 +242,7 @@ describe('drainQueue', () => {
       assert.deepStrictEqual(result, {
         status: 'sent',
         jobId: QUEUED_JOB_ID,
+        counts: { sent: 1, retrying: 0, failed: 0, blocked: 0, uncertain: 0 },
       })
       assert.strictEqual(fx.posts(), 1)
       assert.deepStrictEqual(
@@ -306,7 +310,10 @@ describe('drainQueue', () => {
 
       const result = yield* drainQueue({ now: NOW }).pipe(Effect.provide(fx.layer))
 
-      assert.deepStrictEqual(result, { status: 'idle' })
+      assert.deepStrictEqual(result, {
+        status: 'idle',
+        counts: { sent: 0, retrying: 0, failed: 0, blocked: 0, uncertain: 0 },
+      })
       assert.strictEqual(fx.posts(), 0)
       const finalQueue = fx.values.get(QUEUE_STORAGE_KEY) as ReturnType<typeof emptyQueue>
       assert.strictEqual(finalQueue.jobs.length, 0)
@@ -320,7 +327,10 @@ describe('drainQueue', () => {
 
       const result = yield* drainQueue({ now: NOW }).pipe(Effect.provide(fx.layer))
 
-      assert.deepStrictEqual(result, { status: 'idle' })
+      assert.deepStrictEqual(result, {
+        status: 'idle',
+        counts: { sent: 0, retrying: 0, failed: 0, blocked: 0, uncertain: 0 },
+      })
       assert.strictEqual(fx.posts(), 0)
       const finalQueue = fx.values.get(QUEUE_STORAGE_KEY) as ReturnType<typeof emptyQueue>
       assert.strictEqual(finalQueue.jobs[0]?.status, 'uncertain')
@@ -337,6 +347,7 @@ describe('drainQueue', () => {
       assert.deepStrictEqual(result, {
         status: 'blocked',
         jobId: QUEUED_JOB_ID,
+        counts: { sent: 0, retrying: 0, failed: 0, blocked: 1, uncertain: 0 },
       })
       assert.strictEqual(fx.posts(), 0)
       const finalQueue = fx.values.get(QUEUE_STORAGE_KEY) as ReturnType<typeof emptyQueue>
@@ -355,6 +366,7 @@ describe('drainQueue', () => {
       assert.deepStrictEqual(result, {
         status: 'retrying',
         jobId: QUEUED_JOB_ID,
+        counts: { sent: 0, retrying: 1, failed: 0, blocked: 0, uncertain: 0 },
       })
       assert.strictEqual(fx.posts(), 0)
       const finalQueue = fx.values.get(QUEUE_STORAGE_KEY) as ReturnType<typeof emptyQueue>
@@ -390,6 +402,7 @@ describe('drainQueue', () => {
       assert.deepStrictEqual(result, {
         status: 'failed',
         jobId: QUEUED_JOB_ID,
+        counts: { sent: 0, retrying: 0, failed: 1, blocked: 0, uncertain: 0 },
       })
       const finalQueue = fx.values.get(QUEUE_STORAGE_KEY) as ReturnType<typeof emptyQueue>
       assert.strictEqual(finalQueue.jobs[0]?.status, 'failed')
@@ -407,6 +420,7 @@ describe('drainQueue', () => {
       assert.deepStrictEqual(result, {
         status: 'blocked',
         jobId: QUEUED_JOB_ID,
+        counts: { sent: 0, retrying: 0, failed: 0, blocked: 1, uncertain: 0 },
       })
       assert.strictEqual(fx.posts(), 0)
       const finalQueue = fx.values.get(QUEUE_STORAGE_KEY) as ReturnType<typeof emptyQueue>
@@ -428,6 +442,7 @@ describe('drainQueue', () => {
       assert.deepStrictEqual(result, {
         status: 'failed',
         jobId: QUEUED_JOB_ID,
+        counts: { sent: 0, retrying: 0, failed: 1, blocked: 0, uncertain: 0 },
       })
       const finalQueue = fx.values.get(QUEUE_STORAGE_KEY) as ReturnType<typeof emptyQueue>
       assert.strictEqual(finalQueue.jobs[0]?.status, 'failed')
@@ -450,6 +465,7 @@ describe('drainQueue', () => {
         assert.deepStrictEqual(result, {
           status: 'sent',
           jobId: QUEUED_JOB_ID,
+          counts: { sent: 1, retrying: 0, failed: 0, blocked: 0, uncertain: 0 },
         })
         assert.strictEqual(fx.posts(), 0)
         assert.strictEqual(fx.listCalls(), 1)
@@ -474,6 +490,7 @@ describe('drainQueue', () => {
       assert.deepStrictEqual(result, {
         status: 'uncertain',
         jobId: QUEUED_JOB_ID,
+        counts: { sent: 0, retrying: 0, failed: 0, blocked: 0, uncertain: 1 },
       })
       assert.strictEqual(fx.posts(), 1)
       assert.strictEqual(fx.domRequests.length, 0)
@@ -491,6 +508,7 @@ describe('drainQueue', () => {
       assert.deepStrictEqual(result, {
         status: 'failed',
         jobId: QUEUED_JOB_ID,
+        counts: { sent: 0, retrying: 0, failed: 1, blocked: 0, uncertain: 0 },
       })
       assert.strictEqual(fx.posts(), 1)
       assert.strictEqual(fx.domRequests.length, 0)
@@ -512,6 +530,7 @@ describe('drainQueue', () => {
       assert.deepStrictEqual(result, {
         status: 'failed',
         jobId: QUEUED_JOB_ID,
+        counts: { sent: 0, retrying: 0, failed: 1, blocked: 0, uncertain: 0 },
       })
       assert.strictEqual(fx.posts(), 0)
       assert.strictEqual(fx.values.get(LEDGER_STORAGE_KEY) !== undefined, true)
@@ -530,6 +549,7 @@ describe('drainQueue', () => {
       assert.deepStrictEqual(result, {
         status: 'blocked',
         jobId: QUEUED_JOB_ID,
+        counts: { sent: 0, retrying: 0, failed: 0, blocked: 1, uncertain: 0 },
       })
       // No source mutation, no dead Tier B attempt, and no account-wide cooldown.
       assert.strictEqual(fx.posts(), 0)
@@ -560,6 +580,7 @@ describe('drainQueue', () => {
       assert.deepStrictEqual(result, {
         status: 'uncertain',
         jobId: QUEUED_JOB_ID,
+        counts: { sent: 0, retrying: 0, failed: 0, blocked: 0, uncertain: 1 },
       })
       assert.strictEqual(fx.listCalls(), 0)
       assert.strictEqual(fx.posts(), 0)
@@ -644,6 +665,7 @@ describe('drainQueue', () => {
       assert.deepStrictEqual(result, {
         status: 'retrying',
         jobId: QUEUED_JOB_ID,
+        counts: { sent: 0, retrying: 2, failed: 0, blocked: 0, uncertain: 0 },
       })
       assert.strictEqual(fx.posts(), 0)
       assert.strictEqual(fx.sourceListCalls(), 1)
@@ -692,6 +714,7 @@ describe('drainQueue', () => {
       assert.deepStrictEqual(result, {
         status: 'blocked',
         jobId: YOUTUBE_JOB_ID,
+        counts: { sent: 0, retrying: 0, failed: 0, blocked: 1, uncertain: 0 },
       })
       assert.strictEqual(fx.posts(), 0)
       assert.strictEqual(fx.values.get(TIER_STATE_STORAGE_KEY), undefined)
