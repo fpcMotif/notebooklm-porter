@@ -3,16 +3,25 @@
  * touched in the fx module. Pure logic lives in services.ts.
  */
 import { Effect, Layer } from 'effect'
+import {
+  convexMutationRequest,
+  convexQueryRequest,
+  parseConvexResult,
+  type ConvexRequest,
+} from '../convex/api'
 import { clearDebugLog, dbg, getDebugLog } from '../debug'
 import { DomTabs, makeDomTabs } from '../ingest/dom/driver'
 import { PorterClient, unwrapPorterReply, type PorterMessage, type PorterReply } from '../messaging'
+import { convexUrlFromSettings, getSettings } from '../settings'
 import { DriveAuthError, IpcError, StorageError } from './errors'
+import { INSTALL_ID_KEY, chooseKvLayer, ensureInstallId, makeKvMirror } from './kv-mirror'
 import {
   Alarms,
   DebugLog,
   Http,
   Identity,
   Kv,
+  type KvShape,
   Scripting,
   Tabs,
   makeAlarms,
@@ -23,23 +32,78 @@ import {
 
 export const HttpLive = Layer.succeed(Http, makeHttp(fetch))
 
-export const KvLive = Layer.succeed(
+const kvLocal: KvShape = {
+  get: <T>(key: string) =>
+    Effect.tryPromise({
+      try: async () => {
+        const got = await browser.storage.local.get(key)
+        return got[key] as T | undefined
+      },
+      catch: (cause) => new StorageError({ key, cause }),
+    }),
+  set: (key, value) =>
+    Effect.tryPromise({
+      try: () => browser.storage.local.set({ [key]: value }),
+      catch: (cause) => new StorageError({ key, cause }),
+    }),
+}
+
+export const KvLive = Layer.succeed(Kv, Kv.of(kvLocal))
+
+/** Runs one Convex function over fetch; throws on transport or function error. */
+async function convexFunctionCall(request: ConvexRequest): Promise<unknown> {
+  const res = await fetch(request.url, request.init)
+  if (!res.ok) throw new Error(`convex http ${res.status}`)
+  const parsed = parseConvexResult(await res.json())
+  if (!parsed.ok) throw new Error(parsed.error)
+  return parsed.value
+}
+
+/**
+ * Kv that mirrors every write to the configured Convex deployment (namespaced
+ * by a persisted per-install id). The mirror-vs-local ruling runs once per SW
+ * start (layer build); MV3 restarts the worker constantly, so a settings
+ * change applies on the next start. With no valid convexUrl — or any setup
+ * failure — this IS the plain local shape: default behavior is unchanged, and
+ * the cloud can only ever add best-effort writes, never failures.
+ */
+export const KvConvexMirror = Layer.effect(
   Kv,
-  Kv.of({
-    get: <T>(key: string) =>
-      Effect.tryPromise({
-        try: async () => {
-          const got = await browser.storage.local.get(key)
-          return got[key] as T | undefined
-        },
-        catch: (cause) => new StorageError({ key, cause }),
+  Effect.gen(function* () {
+    const settings = yield* getSettings().pipe(Effect.provide(KvLive))
+    const url = convexUrlFromSettings(settings)
+    if (url === undefined || chooseKvLayer(url) === 'local') return kvLocal
+
+    const stored = yield* kvLocal.get<string>(INSTALL_ID_KEY)
+    const install = ensureInstallId(stored, () => crypto.randomUUID())
+    if (install.created) yield* kvLocal.set(INSTALL_ID_KEY, install.id)
+    dbg('kv-mirror', 'convex mirror active', { installId: install.id })
+
+    return makeKvMirror(kvLocal, {
+      push: async (batch) => {
+        await convexFunctionCall(
+          convexMutationRequest(url, 'kv:kvUpsert', { installId: install.id, rows: [...batch] }),
+        )
+      },
+      pull: (key) =>
+        convexFunctionCall(convexQueryRequest(url, 'kv:kvGet', { installId: install.id, key })),
+      log: (msg, data) => dbg('kv-mirror', msg, data, { level: 'warn' }),
+    })
+  }).pipe(
+    Effect.catch((err) =>
+      Effect.sync(() => {
+        dbg(
+          'kv-mirror',
+          'mirror setup failed — staying local',
+          { error: String(err) },
+          {
+            level: 'warn',
+          },
+        )
+        return kvLocal
       }),
-    set: (key, value) =>
-      Effect.tryPromise({
-        try: () => browser.storage.local.set({ [key]: value }),
-        catch: (cause) => new StorageError({ key, cause }),
-      }),
-  }),
+    ),
+  ),
 )
 
 export const IdentityLive = Layer.succeed(
@@ -90,7 +154,7 @@ export const AlarmsLive = Layer.succeed(Alarms, Alarms.of(makeAlarms(browser.ala
 
 export const PorterLive = Layer.mergeAll(
   HttpLive,
-  KvLive,
+  KvConvexMirror,
   IdentityLive,
   DebugLive,
   TabsLive,

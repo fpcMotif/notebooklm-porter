@@ -204,6 +204,10 @@ export function App() {
     return popupRuntime.runPromise(notebookWorkspace.updateAutoExportVault(autoExportVault))
   }
 
+  function updateConvexUrl(convexUrl: string) {
+    return popupRuntime.runPromise(notebookWorkspace.updateConvexUrl(convexUrl))
+  }
+
   return (
     <div class="p-4 font-sans text-sm">
       <h1 class="mb-1 text-base font-semibold">NotebookLM Porter</h1>
@@ -309,6 +313,21 @@ export function App() {
             />
             Auto-export every capture to the Obsidian vault
           </label>
+          <label class="mb-1 mt-3 block text-gray-700" for="convex-url">
+            Convex deployment URL
+          </label>
+          <input
+            id="convex-url"
+            type="text"
+            class="w-full rounded border border-gray-200 px-2 py-1 text-sm"
+            placeholder="https://your-deployment.convex.cloud"
+            value={settings.convexUrl ?? ''}
+            onChange={(e) => void updateConvexUrl(e.currentTarget.value)}
+          />
+          <p class="mt-1 text-xs text-gray-400">
+            Optional: enables remote selector/RPC profiles and cloud-mirrored state (https URL,
+            takes effect on the next background start). Leave empty to stay fully local.
+          </p>
         </div>
       </details>
       <DebugPanel />

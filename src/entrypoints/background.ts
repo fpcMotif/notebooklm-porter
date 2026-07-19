@@ -13,6 +13,7 @@ import {
 } from '../core/context-menu/handler'
 import { dbg } from '../core/debug'
 import { porterRuntime } from '../core/fx/runtime'
+import { REMOTE_PROFILE_ALARM, refreshRemoteProfile } from '../core/ingest/remote-profile-loader'
 import { decodePorterMessage, type PorterMessage, type PorterReply } from '../core/messaging'
 import { formatDrainBurstNotification } from '../core/notify/notify'
 import {
@@ -128,6 +129,14 @@ function dispatchCaptureUrl(
   >
 }
 
+// Unserialized: the profile refresh touches only its own storage key.
+const refreshProfileOnce = () => {
+  void porterRuntime.runPromise(refreshRemoteProfile()).catch((err: unknown) => {
+    console.error('[porter] remote profile refresh died', err)
+    dbg('bg', 'remote profile refresh died', { error: String(err) })
+  })
+}
+
 export default defineBackground(() => {
   // A long capture holds only `docs`; disjoint queue drains can keep firing.
   const storageLanes = makeStorageLaneScheduler(LANE_ORDER)
@@ -173,9 +182,11 @@ export default defineBackground(() => {
   browser.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === QUEUE_ALARM) drainOnce()
     if (alarm.name === WATCH_ALARM) resyncOnce()
+    if (alarm.name === REMOTE_PROFILE_ALARM) refreshProfileOnce()
   })
   drainOnce()
   resyncOnce()
+  refreshProfileOnce()
 
   void browser.contextMenus
     .removeAll()

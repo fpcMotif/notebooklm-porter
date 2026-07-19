@@ -2,6 +2,8 @@
  * The sole registry for verified NotebookLM DOM selectors. It is intentionally
  * empty until an authenticated disposable notebook supplies live evidence.
  */
+import { activeRemoteSelectorProfile } from '../remote-profile'
+
 export interface DomSelectorProfile {
   id: string
   addSourceTriggers: readonly string[]
@@ -14,8 +16,13 @@ export interface DomSelectorProfile {
 
 export const verifiedDomSelectorProfiles: readonly DomSelectorProfile[] = []
 
+/**
+ * A valid, version-compatible remote profile (Convex-published, applied by
+ * remote-profile-loader.ts) wins over the bundled registry; with none applied
+ * this is exactly the bundled lookup.
+ */
 export function activeDomSelectorProfile(): DomSelectorProfile | undefined {
-  return verifiedDomSelectorProfiles[0]
+  return activeRemoteSelectorProfile() ?? verifiedDomSelectorProfiles[0]
 }
 
 /**

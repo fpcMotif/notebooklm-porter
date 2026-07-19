@@ -12,6 +12,13 @@ const NOTEBOOKLM_HOST = 'https://notebooklm.google.com/*'
 /** Drive backup (design §2) uploads via the SW — a host permission is what makes that fetch CORS-exempt. */
 const DRIVE_HOST = 'https://www.googleapis.com/*'
 
+/**
+ * Optional Convex deployment (remote selector/RPC profiles + Kv mirror).
+ * Extra non-adapter permission — the registry-derived adapter list stays the
+ * single source of truth for capture sites.
+ */
+const CONVEX_HOST = 'https://*.convex.cloud/*'
+
 // https://wxt.dev/api/config.html
 export default defineConfig({
   srcDir: 'src',
@@ -41,7 +48,7 @@ export default defineConfig({
       'scripting',
       'notifications',
     ],
-    host_permissions: [...allHostPermissions(), NOTEBOOKLM_HOST, DRIVE_HOST],
+    host_permissions: [...allHostPermissions(), NOTEBOOKLM_HOST, DRIVE_HOST, CONVEX_HOST],
     // Keyboard shortcut to capture the active tab without opening the popup.
     commands: {
       'capture-current-tab': {

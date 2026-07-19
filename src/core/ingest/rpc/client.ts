@@ -16,6 +16,7 @@ import {
 } from '../../fx/errors'
 import { DebugLog, Http, withHttpTimeout } from '../../fx/services'
 import type { NotebookMeta } from '../../notebooks/model'
+import { effectiveRpcId } from '../remote-profile'
 import type { NotebookSource } from '../sources/model'
 import {
   addTextSourceParams,
@@ -32,7 +33,6 @@ import {
   parseNotebookList,
   parseNotebookSources,
   refreshSourceParams,
-  RPC_IDS,
   type CreateNotebookAck,
 } from './protocol'
 
@@ -205,13 +205,19 @@ export function listNotebooks(
   FetchError | HttpStatusError | ProtocolDrift | RpcRefused,
   Http | DebugLog
 > {
-  return rpcCall(RPC_IDS.listNotebooks, listNotebooksParams(), session, authuser, '/').pipe(
+  return rpcCall(
+    effectiveRpcId('listNotebooks'),
+    listNotebooksParams(),
+    session,
+    authuser,
+    '/',
+  ).pipe(
     Effect.flatMap((result) =>
       Effect.try({
         try: () => parseNotebookList(result),
         catch: (cause) =>
           new ProtocolDrift({
-            rpcId: RPC_IDS.listNotebooks,
+            rpcId: effectiveRpcId('listNotebooks'),
             snippet: cause instanceof Error ? cause.message : String(cause),
           }),
       }),
@@ -228,9 +234,16 @@ export function createNotebook(
   FetchError | HttpStatusError | ProtocolDrift | RpcRefused,
   Http | DebugLog
 > {
-  return rpcCall(RPC_IDS.createNotebook, createNotebookParams(title), session, authuser, '/', {
-    retry: false,
-  }).pipe(Effect.map(parseCreateNotebookAck))
+  return rpcCall(
+    effectiveRpcId('createNotebook'),
+    createNotebookParams(title),
+    session,
+    authuser,
+    '/',
+    {
+      retry: false,
+    },
+  ).pipe(Effect.map(parseCreateNotebookAck))
 }
 
 export function addYoutubeSource(
@@ -244,7 +257,7 @@ export function addYoutubeSource(
   Http | DebugLog
 > {
   return rpcCall(
-    RPC_IDS.addSource,
+    effectiveRpcId('addSource'),
     addYoutubeSourceParams(notebookId, url),
     session,
     authuser,
@@ -265,7 +278,7 @@ export function addTextSource(
   Http | DebugLog
 > {
   return rpcCall(
-    RPC_IDS.addSource,
+    effectiveRpcId('addSource'),
     addTextSourceParams(notebookId, title, content),
     session,
     authuser,
@@ -286,7 +299,7 @@ export function listSources(
   Http | DebugLog
 > {
   return rpcCall(
-    RPC_IDS.getNotebook,
+    effectiveRpcId('getNotebook'),
     getNotebookParams(notebookId),
     session,
     authuser,
@@ -311,7 +324,7 @@ export function deleteSource(
   Http | DebugLog
 > {
   return rpcCall(
-    RPC_IDS.deleteSource,
+    effectiveRpcId('deleteSource'),
     deleteSourceParams(sourceId),
     session,
     authuser,
@@ -331,7 +344,7 @@ export function refreshSource(
   Http | DebugLog
 > {
   return rpcCall(
-    RPC_IDS.refreshSource,
+    effectiveRpcId('refreshSource'),
     refreshSourceParams(sourceId),
     session,
     authuser,

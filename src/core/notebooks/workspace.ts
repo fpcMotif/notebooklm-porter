@@ -73,6 +73,7 @@ export interface NotebookWorkspace {
   readonly updateAutoExportVault: (
     autoExportVault: boolean,
   ) => Effect.Effect<void, never, PorterClient>
+  readonly updateConvexUrl: (convexUrl: string) => Effect.Effect<void, never, PorterClient>
   readonly scanSourceConsole: () => Effect.Effect<void, never, PorterClient>
   readonly removeSourceDuplicates: () => Effect.Effect<void, never, PorterClient>
   readonly retrySource: (sourceId: string) => Effect.Effect<void, never, PorterClient>
@@ -740,6 +741,20 @@ export function makeNotebookWorkspace(): NotebookWorkspace {
         const client = yield* PorterClient
         const result = yield* Effect.result(
           client.request({ type: 'porter/update-settings', patch: { autoExportVault } }),
+        )
+        if (Result.isSuccess(result)) {
+          patch({ settings: preserveLocalDriveClientId(result.success.settings) })
+        }
+      }),
+    updateConvexUrl: (convexUrl) =>
+      Effect.gen(function* () {
+        // Optimistic like the vault toggle: show the typed value, then let the
+        // persisted (validated + normalized) settings round-trip win — an
+        // empty or non-https URL clears the field on the server.
+        patch({ settings: { ...state.settings, convexUrl } })
+        const client = yield* PorterClient
+        const result = yield* Effect.result(
+          client.request({ type: 'porter/update-settings', patch: { convexUrl } }),
         )
         if (Result.isSuccess(result)) {
           patch({ settings: preserveLocalDriveClientId(result.success.settings) })

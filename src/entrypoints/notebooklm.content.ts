@@ -10,11 +10,29 @@ import {
   type DomDeliveryResult,
 } from '../core/ingest/dom/contracts'
 import { activeDomSelectorProfile } from '../core/ingest/dom/selectors'
+import {
+  applyRemoteProfile,
+  REMOTE_PROFILE_KEY,
+  remoteProfileFromCache,
+} from '../core/ingest/remote-profile'
 import { hasMessageType } from '../core/messaging'
 
 export default defineContentScript({
   matches: ['https://notebooklm.google.com/*'],
   main() {
+    // The SW-side loader owns fetch/cache; this context only re-applies the
+    // validated cache so selector lookups here match the queue's routing.
+    // A read failure or empty cache just leaves the bundled profile active.
+    void browser.storage.local
+      .get(REMOTE_PROFILE_KEY)
+      .then((got) => {
+        applyRemoteProfile(
+          remoteProfileFromCache(got[REMOTE_PROFILE_KEY], browser.runtime.getManifest().version),
+        )
+        return undefined
+      })
+      .catch(() => undefined)
+
     browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (!hasMessageType(message, 'porter/dom-deliver')) return
       const profile = activeDomSelectorProfile()

@@ -1,4 +1,5 @@
 import { Effect } from 'effect'
+import { isValidConvexUrl, normalizeConvexUrl } from './convex/api'
 import type { NblmAccount } from './accounts/parse'
 import type { StorageError } from './fx/errors'
 import { kvSlot } from './fx/kv-slot'
@@ -31,6 +32,12 @@ export interface PorterSettings {
   autoExportVault: boolean
   /** Google OAuth Client ID (Chrome Extension type) for Drive backup. */
   driveClientId?: string
+  /**
+   * Optional Convex deployment URL (https) enabling the remote profile feed
+   * and the cloud-mirrored Kv layer. Absent = fully local, zero Convex
+   * network — today's default behavior.
+   */
+  convexUrl?: string
 }
 
 export type SettingsPatch = Partial<PorterSettings>
@@ -49,6 +56,7 @@ const SETTING_KEYS = new Set<keyof PorterSettings>([
   'notebookTargets',
   'autoExportVault',
   'driveClientId',
+  'convexUrl',
 ])
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -182,6 +190,10 @@ export function decodeSettingsPatch(value: unknown): SettingsPatch | undefined {
     if (typeof value.driveClientId !== 'string') return undefined
     patch.driveClientId = value.driveClientId
   }
+  if (Object.hasOwn(value, 'convexUrl')) {
+    if (typeof value.convexUrl !== 'string') return undefined
+    patch.convexUrl = value.convexUrl
+  }
   return patch
 }
 
@@ -214,6 +226,9 @@ export function decodeStoredSettings(value: unknown): PorterSettings {
     ...(Object.hasOwn(value, 'driveClientId') && typeof value.driveClientId === 'string'
       ? { driveClientId: value.driveClientId }
       : {}),
+    ...(Object.hasOwn(value, 'convexUrl') && typeof value.convexUrl === 'string'
+      ? { convexUrl: value.convexUrl }
+      : {}),
   }
 }
 
@@ -244,6 +259,19 @@ export function resolveNotebookTarget(
   return notebooks[0]?.id ?? ''
 }
 
+/** Normalizes to a usable https deployment URL, or undefined when unset/invalid. */
+export function sanitizeConvexUrl(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined
+  const trimmed = value.trim()
+  if (trimmed === '' || !isValidConvexUrl(trimmed)) return undefined
+  return normalizeConvexUrl(trimmed)
+}
+
+/** The single read path for the optional Convex URL — stored junk never leaks out. */
+export function convexUrlFromSettings(settings: PorterSettings): string | undefined {
+  return sanitizeConvexUrl(settings.convexUrl)
+}
+
 /** Returns a patch that records one notebook as the successful destination for each site. */
 export function notebookTargetPatch(
   current: NotebookTargets,
@@ -267,6 +295,12 @@ export function updateSettings(
   return Effect.gen(function* () {
     const current = yield* getSettings()
     const next: PorterSettings = { ...current, ...patch }
+    // convexUrl is validated on write: an empty or non-https value clears it.
+    if ('convexUrl' in patch) {
+      const cleaned = sanitizeConvexUrl(patch.convexUrl)
+      if (cleaned === undefined) delete next.convexUrl
+      else next.convexUrl = cleaned
+    }
     yield* settingsSlot.save(next)
     return next
   })

@@ -2,12 +2,14 @@ import { assert, describe, it } from '@effect/vitest'
 import { Effect } from 'effect'
 import { kvTest } from './fx/testing'
 import {
+  convexUrlFromSettings,
   DEFAULT_SETTINGS,
   decodeSettingsPatch,
   decodeStoredSettings,
   getSettings,
   notebookTargetPatch,
   resolveNotebookTarget,
+  sanitizeConvexUrl,
   updateSettings,
 } from './settings'
 
@@ -139,5 +141,31 @@ describe('settings', () => {
         hackernews: 'nb-a',
       },
     )
+  })
+
+  it.effect('validates convexUrl on write: normalizes valid, clears empty or invalid', () =>
+    Effect.gen(function* () {
+      const set = yield* updateSettings({ convexUrl: ' https://demo.convex.cloud/ ' })
+      assert.strictEqual(set.convexUrl, 'https://demo.convex.cloud')
+
+      const invalid = yield* updateSettings({ convexUrl: 'http://not-https.example' })
+      assert.isFalse('convexUrl' in invalid)
+
+      const restored = yield* updateSettings({ convexUrl: 'https://demo.convex.cloud' })
+      assert.strictEqual(restored.convexUrl, 'https://demo.convex.cloud')
+
+      const cleared = yield* updateSettings({ convexUrl: '' })
+      assert.isFalse('convexUrl' in cleared)
+    }).pipe(Effect.provide(kvTest())),
+  )
+
+  it('reads the convex URL only through the sanitizing read path', () => {
+    assert.strictEqual(
+      convexUrlFromSettings({ ...DEFAULT_SETTINGS, convexUrl: 'https://demo.convex.cloud/' }),
+      'https://demo.convex.cloud',
+    )
+    assert.strictEqual(convexUrlFromSettings(DEFAULT_SETTINGS), undefined)
+    assert.strictEqual(convexUrlFromSettings({ ...DEFAULT_SETTINGS, convexUrl: 'junk' }), undefined)
+    assert.strictEqual(sanitizeConvexUrl('   '), undefined)
   })
 })

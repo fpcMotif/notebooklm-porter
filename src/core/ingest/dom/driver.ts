@@ -65,7 +65,11 @@ function isMissingReceiver(reason: string): boolean {
  */
 export function makeDomTabs(tabs: DomTabsApi): DomTabsShape {
   return {
-    available: hasVerifiedDomDriver(),
+    // Read per access (not captured at layer build) so a remote selector
+    // profile applied after SW startup is honored by queue routing.
+    get available() {
+      return hasVerifiedDomDriver()
+    },
     deliver: (request) =>
       Effect.gen(function* () {
         const existing = yield* Effect.result(
