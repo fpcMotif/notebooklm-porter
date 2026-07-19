@@ -10,6 +10,7 @@
  */
 
 import { type NotebookSource, sourceKindFromCode, sourceStatusFromCode } from '../sources/model'
+import type { NotebookMeta } from '../../notebooks/model'
 
 export const RPC_IDS = {
   addSource: 'izAoDd',
@@ -70,14 +71,6 @@ export function listNotebooksParams(): unknown[] {
 
 export function createNotebookParams(title: string): unknown[] {
   return [title, null, null, TEMPLATE_BLOCK]
-}
-
-export function addUrlSourceParams(notebookId: string, url: string): unknown[] {
-  return [
-    [[null, null, [url], null, null, null, null, null, null, null, 1]],
-    notebookId,
-    TEMPLATE_BLOCK,
-  ]
 }
 
 export function addYoutubeSourceParams(notebookId: string, url: string): unknown[] {
@@ -217,7 +210,7 @@ export function parseBatchexecuteResponse(text: string, rpcId: string): unknown 
       if (frame[1] !== rpcId) continue
 
       if (frame[0] === 'er') {
-        throw new Error(`rpc-error: ${JSON.stringify(frame[2])}`)
+        throw new Error(`rpc-error: ${safeRpcErrorCode(frame[2])}`)
       }
       if (frame[0] === 'wrb.fr') {
         sawFrame = true
@@ -235,7 +228,7 @@ export function parseBatchexecuteResponse(text: string, rpcId: string): unknown 
     // create duplicate sources.
     if (sawFrame) return null
     throw new Error(
-      `protocol-drift: no wrb.fr frame found for rpcId ${rpcId} in response: ${text.slice(0, 500)}`,
+      `protocol-drift: no wrb.fr frame found for rpcId ${rpcId}; responseBytes=${text.length}`,
     )
   }
 
@@ -246,29 +239,86 @@ export function parseBatchexecuteResponse(text: string, rpcId: string): unknown 
   }
 }
 
-/**
- * Skips malformed rows (missing id/title) rather than throwing on a partial
- * list. Live wXbhsf responses nest the rows one level down (`result[0]`);
- * some fixtures/back-ends return the rows array directly — accept both.
- */
-export function parseNotebookList(result: unknown): { id: string; title: string }[] {
-  const direct = notebookRows(result)
-  if (direct.length > 0) return direct
-  if (Array.isArray(result)) return notebookRows(result[0])
-  return []
+function safeRpcErrorCode(value: unknown): string {
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  if (typeof value === 'string' && SAFE_RPC_ERROR_CODES.has(value)) return value
+  return 'UNKNOWN'
 }
 
-function notebookRows(rows: unknown): { id: string; title: string }[] {
-  if (!Array.isArray(rows)) return []
+const SAFE_RPC_ERROR_CODES = new Set([
+  'ABORTED',
+  'ALREADY_EXISTS',
+  'CANCELLED',
+  'DEADLINE_EXCEEDED',
+  'FAILED_PRECONDITION',
+  'INTERNAL',
+  'INVALID_ARGUMENT',
+  'NOT_FOUND',
+  'PERMISSION_DENIED',
+  'QUOTA_EXCEEDED',
+  'RESOURCE_EXHAUSTED',
+  'UNAUTHENTICATED',
+  'UNAVAILABLE',
+  'UNKNOWN',
+])
 
-  const notebooks: { id: string; title: string }[] = []
-  for (const row of rows) {
-    if (!Array.isArray(row)) continue
+/** Strictly decodes the two verified wXbhsf catalog containers. */
+export function parseNotebookList(result: unknown): NotebookMeta[] {
+  if (!Array.isArray(result)) {
+    throw new Error('protocol-drift: notebook list is not an array')
+  }
+  if (result.length === 0) return []
+  const nested =
+    (result.length === 1 || (result.length === 2 && result[1] === null)) &&
+    Array.isArray(result[0]) &&
+    !isNotebookRow(result[0])
+  if (nested) {
+    return notebookRows(result[0])
+  }
+  return notebookRows(result)
+}
+
+function isNotebookRow(value: unknown): value is unknown[] {
+  return Array.isArray(value) && typeof value[0] === 'string' && typeof value[2] === 'string'
+}
+
+function notebookRows(rows: unknown[]): NotebookMeta[] {
+  const notebooks: NotebookMeta[] = []
+  for (const [index, row] of rows.entries()) {
+    if (!Array.isArray(row)) {
+      throw new Error(`protocol-drift: notebook row ${index} is not an array`)
+    }
     const title = row[0]
     const id = row[2]
-    if (typeof title === 'string' && typeof id === 'string') {
-      notebooks.push({ id, title })
+    if (typeof title !== 'string' || typeof id !== 'string') {
+      throw new Error(`protocol-drift: notebook row ${index} lacks title or id`)
     }
+    notebooks.push({ id, title })
   }
   return notebooks
+}
+
+export interface CreateNotebookAck {
+  readonly hintedId?: string
+}
+
+/** Extracts the only trusted create-response fact; unknown accepted shapes carry no hint. */
+export function parseCreateNotebookAck(result: unknown): CreateNotebookAck {
+  if (isCreateNotebookHint(result)) return { hintedId: result[2] }
+  if (Array.isArray(result) && result.length === 1 && isCreateNotebookHint(result[0])) {
+    return { hintedId: result[0][2] }
+  }
+  return {}
+}
+
+function isCreateNotebookHint(
+  value: unknown,
+): value is [title: string, placeholder: null, id: string] {
+  return (
+    Array.isArray(value) &&
+    value.length === 3 &&
+    typeof value[0] === 'string' &&
+    value[1] === null &&
+    typeof value[2] === 'string'
+  )
 }

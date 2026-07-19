@@ -1,5 +1,5 @@
 import { assert, describe, it } from '@effect/vitest'
-import { Effect, Result } from 'effect'
+import { Effect, Fiber, Result } from 'effect'
 import { AlarmError, FetchError, HttpStatusError, IpcError } from './errors'
 import { makeAlarms, makeHttp, makeScripting, makeTabs } from './services'
 
@@ -62,6 +62,27 @@ describe('makeHttp', () => {
       if (Result.isFailure(result)) {
         assert.instanceOf(result.failure, FetchError)
       }
+    }),
+  )
+
+  it.effect('aborts the underlying fetch when the effect is interrupted', () =>
+    Effect.gen(function* () {
+      let signal: AbortSignal | undefined
+      const http = makeHttp(
+        fakeFetch(
+          (_url, init) =>
+            new Promise<Response>((_resolve, reject) => {
+              signal = init?.signal ?? undefined
+              signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+            }),
+        ),
+      )
+      const fiber = yield* http.text('https://example.com').pipe(Effect.forkChild)
+      yield* Effect.yieldNow
+
+      yield* Fiber.interrupt(fiber)
+
+      assert.isTrue(signal?.aborted)
     }),
   )
 })

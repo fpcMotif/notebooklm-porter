@@ -212,7 +212,7 @@ export function makeHttp(fetchImpl: typeof fetch): HttpShape {
   const request = (url: string, init?: HttpInit) =>
     Effect.gen(function* () {
       const res = yield* Effect.tryPromise({
-        try: () => fetchImpl(url, init),
+        try: (signal) => fetchImpl(url, { ...init, signal }),
         catch: (cause) => new FetchError({ url, cause }),
       })
       if (!res.ok) {

@@ -6,19 +6,15 @@ import type { Playlist, Post, Thread } from '../model/types'
  * job via FormatOptions). Power-user export only; never fed to NotebookLM.
  */
 export function threadToJsonl(thread: Thread): string {
-  return thread.posts.map((post) => JSON.stringify(postToRecord(post))).join('\n')
+  return thread.posts.map((post) => JSON.stringify(postToJsonlRecord(post))).join('\n')
 }
 
-function postToRecord(post: Post) {
+function postToJsonlRecord(post: Post): Post {
   return {
-    id: post.id,
-    author: post.author,
-    depth: post.depth,
-    byOp: post.byOp,
-    createdAt: post.createdAt,
-    text: post.text,
-    score: post.score,
-    parentId: post.parentId,
+    ...post,
+    author: { ...post.author },
+    ...(post.media !== undefined ? { media: post.media.map((media) => ({ ...media })) } : {}),
+    ...(post.links !== undefined ? { links: [...post.links] } : {}),
   }
 }
 

@@ -1,17 +1,16 @@
 import { Effect, Result } from 'effect'
-import { useEffect, useRef, useState } from 'preact/hooks'
+import { useEffect, useState } from 'preact/hooks'
+import { accountBindingFor, notebookTargetFor } from '../../core/accounts/ownership'
 import { filterDebugEntries, type DebugEntry, type DebugLevel } from '../../core/debug'
 import { Tabs } from '../../core/fx/services'
 import { popupRuntime } from '../../core/fx/runtime-popup'
-import type { ConsoleScan } from '../../core/ingest/sources/console'
-import type { SourceDoc } from '../../core/model/types'
-import { PorterClient, type NotebookMeta } from '../../core/messaging'
-import { summarizeQueue, type QueueSnapshot } from '../../core/queue/queue'
-import { DEFAULT_SETTINGS, resolveNotebookTarget, type PorterSettings } from '../../core/settings'
+import { PorterClient } from '../../core/messaging'
+import { summarizeQueue } from '../../core/queue/queue'
+import { watchForTarget, watchTargetLabel } from '../../core/popup/watches'
 import { canWatchSource } from '../../core/watch/eligibility'
-import type { WatchView } from '../../core/watch/watch'
 import { useAction } from './useAction'
-import { useGenerationGuard } from './useGenerationGuard'
+import { useNotebookWorkspace } from './useNotebookWorkspace'
+import { usePopupRefresh } from './usePopupRefresh'
 
 /**
  * Popup: detect what the active tab offers, one-click capture, then a
@@ -45,175 +44,43 @@ async function clearDebugLog() {
 }
 
 export function App() {
-  const [docs, setDocs] = useState<SourceDoc[]>([])
-  const [capturable, setCapturable] = useState<string | undefined>()
-  const [canEnrichTranscripts, setCanEnrichTranscripts] = useState(false)
   const [enrichTranscripts, setEnrichTranscripts] = useState(false)
-  const [settings, setSettings] = useState<PorterSettings>(DEFAULT_SETTINGS)
   const [backupResult, setBackupResult] = useState<{ text: string; isError: boolean } | undefined>()
-  const [notebooks, setNotebooks] = useState<NotebookMeta[]>([])
-  const [notebooksError, setNotebooksError] = useState<string | undefined>()
-  const [selectedNotebookId, setSelectedNotebookId] = useState('')
-  const [newNotebookTitle, setNewNotebookTitle] = useState('')
-  const [ingestResult, setIngestResult] = useState<
-    | { queued: number; failed: number; uncertain: number; blocked: number; error?: string }
-    | undefined
-  >()
-  const [retryJobIds, setRetryJobIds] = useState<string[]>([])
-  const [watches, setWatches] = useState<WatchView[]>([])
+  const [ingestError, setIngestError] = useState<string | undefined>()
   const [watchError, setWatchError] = useState<string | undefined>()
   const [debugCopyStatus, setDebugCopyStatus] = useState<string | undefined>()
   const [debugEntries, setDebugEntries] = useState<DebugEntry[]>([])
   const [debugQuery, setDebugQuery] = useState('')
   const [debugLevel, setDebugLevel] = useState<'all' | DebugLevel>('all')
   const [debugLoading, setDebugLoading] = useState(false)
-  const [switchingAccount, setSwitchingAccount] = useState(false)
-  const [consoleScan, setConsoleScan] = useState<ConsoleScan | undefined>()
-  const [consoleStatus, setConsoleStatus] = useState<string | undefined>()
-  const notebookLoadGuard = useGenerationGuard()
-  // Not converted to useGenerationGuard: createNotebookAction peeks this
-  // counter's current value without starting a new generation (see below),
-  // which the begin()/isCurrent() pair can't express.
-  const accountLoadGeneration = useRef(0)
-  const accountSwitchGuard = useGenerationGuard()
-
-  function applyNotebookList(
-    list: NotebookMeta[],
-    listSettings: PorterSettings,
-    listDocs: SourceDoc[],
-    currentId: string,
-    generation: number,
-  ) {
-    if (!notebookLoadGuard.isCurrent(generation)) return
-    setNotebooks(list)
-    setSelectedNotebookId(
-      resolveNotebookTarget(list, listDocs, listSettings.notebookTargets, currentId),
-    )
-  }
-
-  function applyQueueSnapshot(queue: QueueSnapshot) {
-    const summary = summarizeQueue(queue)
-    if (summary === undefined) {
-      setIngestResult(undefined)
-      setRetryJobIds([])
-      return
-    }
-    setIngestResult({
-      queued: summary.queued,
-      failed: summary.failed,
-      uncertain: summary.uncertain,
-      blocked: summary.blocked,
-      ...(summary.error !== undefined ? { error: summary.error } : {}),
-    })
-    setRetryJobIds(summary.retryJobIds)
-  }
-
-  // Shared with accountsAction (FIX 3) so discovering accounts for the first
-  // time also populates the notebook list, instead of composing via a faked
-  // click on loadNotebooksAction.
-  const loadNotebooksEffect = Effect.gen(function* () {
-    const generation = notebookLoadGuard.begin()
-    setNotebooksError(undefined)
-    const client = yield* PorterClient
-    const result = yield* Effect.result(
-      client.request({ type: 'porter/list-notebooks', forceRefresh: true }),
-    )
-    if (Result.isFailure(result)) {
-      if (notebookLoadGuard.isCurrent(generation)) {
-        setNotebooksError(result.failure.reason)
-      }
-      return
-    }
-    const list = result.success.notebooks
-    applyNotebookList(list, settings, docs, selectedNotebookId, generation)
-  })
-
-  const loadNotebooksAction = useAction<[]>(() => loadNotebooksEffect)
-
-  const createNotebookAction = useAction<[]>(() =>
-    Effect.gen(function* () {
-      const accountGeneration = accountLoadGeneration.current
-      const title = newNotebookTitle.trim()
-      if (title === '') return
-      setNotebooksError(undefined)
-      const client = yield* PorterClient
-      const result = yield* Effect.result(client.request({ type: 'porter/create-notebook', title }))
-      if (Result.isFailure(result)) {
-        if (accountLoadGeneration.current === accountGeneration) {
-          setNotebooksError(result.failure.reason)
-        }
-        return
-      }
-      if (accountLoadGeneration.current !== accountGeneration) return
-      const generation = notebookLoadGuard.begin()
-      applyNotebookList(
-        result.success.notebooks,
-        settings,
-        docs,
-        result.success.created.id,
-        generation,
-      )
-      setNewNotebookTitle('')
-    }),
-  )
-
-  const refreshEffect = Effect.gen(function* () {
-    const accountGeneration = ++accountLoadGeneration.current
-    const client = yield* PorterClient
-    const tabs = yield* Tabs
-    const tab = yield* tabs.activeTab()
-    if (tab.url) {
-      const detected = yield* Effect.result(client.request({ type: 'porter/detect', url: tab.url }))
-      if (Result.isSuccess(detected)) {
-        setCapturable(detected.success.capturable)
-        setCanEnrichTranscripts(detected.success.canEnrichTranscripts === true)
-        if (!detected.success.canEnrichTranscripts) setEnrichTranscripts(false)
-      }
-    }
-    const listed = yield* Effect.result(client.request({ type: 'porter/list-docs' }))
-    const listedDocs = Result.isSuccess(listed) ? listed.success.docs : docs
-    if (Result.isSuccess(listed)) setDocs(listedDocs)
-    const settingsResult = yield* Effect.result(client.request({ type: 'porter/get-settings' }))
-    if (Result.isSuccess(settingsResult)) {
-      if (accountLoadGeneration.current !== accountGeneration) return
-      setSettings(settingsResult.success.settings)
-      if (settingsResult.success.settings.accounts.length > 0) {
-        const generation = notebookLoadGuard.begin()
-        const notebooksResult = yield* Effect.result(
-          client.request({ type: 'porter/list-notebooks' }),
-        )
-        if (Result.isFailure(notebooksResult)) {
-          if (accountLoadGeneration.current === accountGeneration) {
-            setNotebooksError(notebooksResult.failure.reason)
-          }
-        } else {
-          if (accountLoadGeneration.current !== accountGeneration) return
-          applyNotebookList(
-            notebooksResult.success.notebooks,
-            settingsResult.success.settings,
-            listedDocs,
-            selectedNotebookId,
-            generation,
-          )
-        }
-      }
-    }
-    const queueResult = yield* Effect.result(client.request({ type: 'porter/queue-status' }))
-    if (Result.isSuccess(queueResult)) applyQueueSnapshot(queueResult.success.queue)
-    const watchesResult = yield* Effect.result(client.request({ type: 'porter/watch-list' }))
-    if (Result.isSuccess(watchesResult)) setWatches(watchesResult.success.watches)
-  })
-
-  function refresh() {
-    return popupRuntime.runPromise(refreshEffect)
-  }
+  const { controller: notebookWorkspace, snapshot: workspaceState } = useNotebookWorkspace()
+  const { coordinator: popupRefresh, snapshot: refreshState } = usePopupRefresh(notebookWorkspace)
+  const { docs, capturable, canEnrichTranscripts, watches } = refreshState
+  const {
+    settings,
+    notebooks,
+    selectedNotebookId,
+    newNotebookTitle,
+    error: notebooksError,
+    driveError,
+    pending: notebookPending,
+    sourceConsole,
+  } = workspaceState
+  const accountBusy =
+    notebookPending.bootstrap || notebookPending.discover || notebookPending.switchAccount
+  const consoleBusy = sourceConsole.pending !== undefined
+  const selectedNotebookTarget = notebookTargetFor(settings, selectedNotebookId)
+  const currentAccountBinding = accountBindingFor(settings)
+  const queueSummary =
+    refreshState.queue === undefined ? undefined : summarizeQueue(refreshState.queue)
 
   useEffect(() => {
-    void refresh()
-    // Mount-only refresh — refresh is a plain function redefined each render,
-    // not a reactive dependency; including it would re-run on every render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+    void popupRuntime.runPromise(popupRefresh.refresh())
+  }, [popupRefresh])
+
+  useEffect(() => {
+    if (!canEnrichTranscripts) setEnrichTranscripts(false)
+  }, [canEnrichTranscripts])
 
   const captureAction = useAction<[]>(() =>
     Effect.gen(function* () {
@@ -229,35 +96,28 @@ export function App() {
           ...(enrichTranscripts ? { options: { enrichTranscripts: true as const } } : {}),
         }),
       )
-      yield* refreshEffect
+      yield* popupRefresh.refresh()
       if (Result.isFailure(result)) return yield* Effect.fail(result.failure)
     }),
   )
 
   const ingestAction = useAction<[string[]]>((docIds) =>
     Effect.gen(function* () {
-      if (selectedNotebookId === '') return
-      setIngestResult(undefined)
-      setRetryJobIds([])
+      if (selectedNotebookTarget === undefined) return
+      setIngestError(undefined)
       const client = yield* PorterClient
       const result = yield* Effect.result(
         client.request({
           type: 'porter/queue-enqueue',
           docIds,
-          notebookId: selectedNotebookId,
+          target: selectedNotebookTarget,
         }),
       )
       if (Result.isFailure(result)) {
-        setIngestResult({
-          queued: 0,
-          failed: 1,
-          uncertain: 0,
-          blocked: 0,
-          error: result.failure.reason,
-        })
+        setIngestError(result.failure.reason)
         return
       }
-      applyQueueSnapshot(result.success.queue)
+      popupRefresh.acceptQueueSnapshot(result.success.queue)
     }),
   )
 
@@ -266,32 +126,27 @@ export function App() {
       const client = yield* PorterClient
       const result = yield* Effect.result(client.request({ type: 'porter/queue-retry', jobIds }))
       if (Result.isFailure(result)) {
-        setIngestResult({
-          queued: 0,
-          failed: 1,
-          uncertain: 0,
-          blocked: 0,
-          error: result.failure.reason,
-        })
+        setIngestError(result.failure.reason)
         return
       }
-      applyQueueSnapshot(result.success.queue)
+      setIngestError(undefined)
+      popupRefresh.acceptQueueSnapshot(result.success.queue)
     }),
   )
 
   const watchAction = useAction<[string]>((docId) =>
     Effect.gen(function* () {
-      if (selectedNotebookId === '') return
+      if (selectedNotebookTarget === undefined) return
       setWatchError(undefined)
       const client = yield* PorterClient
       const result = yield* Effect.result(
-        client.request({ type: 'porter/watch-create', docId, notebookId: selectedNotebookId }),
+        client.request({ type: 'porter/watch-create', docId, target: selectedNotebookTarget }),
       )
       if (Result.isFailure(result)) {
         setWatchError(result.failure.reason)
         return
       }
-      setWatches(result.success.watches)
+      popupRefresh.acceptWatches(result.success.watches)
     }),
   )
 
@@ -304,40 +159,7 @@ export function App() {
         setWatchError(result.failure.reason)
         return
       }
-      setWatches(result.success.watches)
-    }),
-  )
-
-  const accountsAction = useAction<[]>(() =>
-    Effect.gen(function* () {
-      const accountGeneration = ++accountLoadGeneration.current
-      const client = yield* PorterClient
-      const result = yield* Effect.result(client.request({ type: 'porter/accounts-refresh' }))
-      if (Result.isFailure(result)) return
-      const settingsResult = yield* Effect.result(client.request({ type: 'porter/get-settings' }))
-      if (Result.isFailure(settingsResult)) return
-      if (accountLoadGeneration.current !== accountGeneration) return
-      setSettings(settingsResult.success.settings)
-      if (settingsResult.success.settings.accounts.length > 0) {
-        const generation = notebookLoadGuard.begin()
-        const notebooksResult = yield* Effect.result(
-          client.request({ type: 'porter/list-notebooks', forceRefresh: true }),
-        )
-        if (Result.isFailure(notebooksResult)) {
-          if (accountLoadGeneration.current === accountGeneration) {
-            setNotebooksError(notebooksResult.failure.reason)
-          }
-        } else {
-          if (accountLoadGeneration.current !== accountGeneration) return
-          applyNotebookList(
-            notebooksResult.success.notebooks,
-            settingsResult.success.settings,
-            docs,
-            '',
-            generation,
-          )
-        }
-      }
+      popupRefresh.acceptWatches(result.success.watches)
     }),
   )
 
@@ -364,106 +186,11 @@ export function App() {
   )
 
   function selectAccount(authuser: number) {
-    setSwitchingAccount(true)
-    const switchGeneration = accountSwitchGuard.begin()
-    const accountGeneration = ++accountLoadGeneration.current
-    const generation = notebookLoadGuard.begin()
-    setSelectedNotebookId('')
-    setNotebooks([])
-    setNotebooksError(undefined)
-    return popupRuntime
-      .runPromise(
-        Effect.gen(function* () {
-          const client = yield* PorterClient
-          const result = yield* Effect.result(
-            client.request({ type: 'porter/update-settings', patch: { nblmAuthuser: authuser } }),
-          )
-          if (Result.isFailure(result)) {
-            setNotebooksError(result.failure.reason)
-            return
-          }
-          if (accountLoadGeneration.current !== accountGeneration) return
-          setSettings(result.success.settings)
-          const listed = yield* Effect.result(client.request({ type: 'porter/list-notebooks' }))
-          if (Result.isFailure(listed)) {
-            if (accountLoadGeneration.current !== accountGeneration) return
-            setNotebooksError(listed.failure.reason)
-            return
-          }
-          if (accountLoadGeneration.current !== accountGeneration) return
-          applyNotebookList(listed.success.notebooks, result.success.settings, docs, '', generation)
-        }),
-      )
-      .catch((err: unknown) => {
-        if (accountLoadGeneration.current === accountGeneration) {
-          setNotebooksError(err instanceof Error ? err.message : String(err))
-        }
-      })
-      .finally(() => {
-        if (accountSwitchGuard.isCurrent(switchGeneration)) setSwitchingAccount(false)
-      })
+    return popupRuntime.runPromise(notebookWorkspace.switchAccount(authuser))
   }
 
-  const scanConsoleAction = useAction<[]>(() =>
-    Effect.gen(function* () {
-      const client = yield* PorterClient
-      const result = yield* Effect.result(
-        client.request({ type: 'porter/nblm-scan-console', notebookId: selectedNotebookId }),
-      )
-      if (Result.isFailure(result)) {
-        setConsoleStatus(result.failure.reason)
-        return
-      }
-      setConsoleScan(result.success.scan)
-      setConsoleStatus(undefined)
-    }),
-  )
-
-  const dedupeAction = useAction<[]>(() =>
-    Effect.gen(function* () {
-      const client = yield* PorterClient
-      const result = yield* Effect.result(
-        client.request({ type: 'porter/nblm-dedupe', notebookId: selectedNotebookId }),
-      )
-      if (Result.isFailure(result)) {
-        setConsoleStatus(result.failure.reason)
-        return
-      }
-      const removed = result.success.removedIds.length
-      setConsoleScan(result.success.scan)
-      setConsoleStatus(`Removed ${removed} duplicate source${removed === 1 ? '' : 's'}`)
-    }),
-  )
-
-  const retrySourceAction = useAction<[string]>((sourceId) =>
-    Effect.gen(function* () {
-      const client = yield* PorterClient
-      const result = yield* Effect.result(
-        client.request({
-          type: 'porter/nblm-retry-source',
-          notebookId: selectedNotebookId,
-          sourceId,
-        }),
-      )
-      if (Result.isFailure(result)) {
-        setConsoleStatus(result.failure.reason)
-        return
-      }
-      setConsoleScan(result.success.scan)
-      setConsoleStatus('Retry requested — re-scan in a moment to see the new status')
-    }),
-  )
-
   function updateDriveClientId(driveClientId: string) {
-    return popupRuntime.runPromise(
-      Effect.gen(function* () {
-        const client = yield* PorterClient
-        const result = yield* Effect.result(
-          client.request({ type: 'porter/update-settings', patch: { driveClientId } }),
-        )
-        if (Result.isSuccess(result)) setSettings(result.success.settings)
-      }),
-    )
+    return popupRuntime.runPromise(notebookWorkspace.updateDriveClientId(driveClientId))
   }
 
   function flashDebugStatus(text: string) {
@@ -527,7 +254,7 @@ export function App() {
           <select
             class="flex-1 rounded border border-gray-200 px-2 py-1 text-sm"
             value={settings.nblmAuthuser}
-            disabled={switchingAccount}
+            disabled={accountBusy || notebookPending.create || consoleBusy}
             onChange={(e) => void selectAccount(Number(e.currentTarget.value))}
           >
             {settings.accounts.map((account) => (
@@ -544,16 +271,17 @@ export function App() {
               ? 'text-gray-500 disabled:opacity-50'
               : 'text-blue-600 disabled:opacity-50'
           }
-          disabled={accountsAction.busy || switchingAccount}
-          onClick={() => accountsAction.run()}
+          disabled={accountBusy || notebookPending.create || consoleBusy}
+          onClick={() => void popupRuntime.runPromise(notebookWorkspace.discoverAccounts())}
         >
-          {accountsAction.busy
+          {notebookPending.discover
             ? 'Finding accounts…'
             : settings.accounts.length > 0
               ? '↻'
               : '↻ find accounts'}
         </button>
       </div>
+      {notebooksError && <p class="mb-3 text-xs text-red-600">{notebooksError}</p>}
       {capturable ? (
         <div class="mb-3">
           {canEnrichTranscripts && (
@@ -587,8 +315,10 @@ export function App() {
         {docs.map((doc) => {
           const docWatches = watches.filter((watch) => watch.sourceDocId === doc.id)
           const canWatch = canWatchSource(doc)
-          const watchForSelectedNotebook = docWatches.find(
-            (watch) => watch.notebookId === selectedNotebookId,
+          const watchForSelectedNotebook = watchForTarget(
+            docWatches,
+            doc.id,
+            selectedNotebookTarget,
           )
           return (
             <li key={doc.id} class="rounded border border-gray-200 p-2">
@@ -601,10 +331,7 @@ export function App() {
               {docWatches.map((watch) => (
                 <div key={watch.id} class="mt-1 flex items-center gap-2 text-xs text-gray-500">
                   <span>
-                    Auto-sync{' '}
-                    {notebooks.find((notebook) => notebook.id === watch.notebookId)?.title ??
-                      watch.notebookId}{' '}
-                    ·{' '}
+                    Auto-sync {watchTargetLabel(watch, currentAccountBinding, notebooks)} ·{' '}
                     {watch.status === 'active'
                       ? `next ${new Date(watch.nextRunAt).toLocaleString()}`
                       : 'disabled'}
@@ -621,13 +348,13 @@ export function App() {
                 </div>
               ))}
               {canWatch &&
-                selectedNotebookId !== '' &&
+                selectedNotebookTarget !== undefined &&
                 (watchForSelectedNotebook === undefined ||
                   watchForSelectedNotebook.status === 'disabled') && (
                   <button
                     type="button"
                     class="mt-1 text-xs text-blue-600 disabled:opacity-50"
-                    disabled={watchAction.busy || switchingAccount}
+                    disabled={watchAction.busy || accountBusy}
                     onClick={() => watchAction.run(doc.id)}
                   >
                     {watchForSelectedNotebook?.status === 'disabled'
@@ -647,8 +374,8 @@ export function App() {
               <select
                 class="flex-1 rounded border border-gray-200 px-2 py-1 text-sm"
                 value={selectedNotebookId}
-                disabled={switchingAccount}
-                onChange={(e) => setSelectedNotebookId(e.currentTarget.value)}
+                disabled={accountBusy || notebookPending.create || consoleBusy}
+                onChange={(e) => notebookWorkspace.selectNotebook(e.currentTarget.value)}
               >
                 <option value="" disabled>
                   Choose a notebook…
@@ -662,10 +389,12 @@ export function App() {
               <button
                 type="button"
                 class="text-gray-500 disabled:opacity-50"
-                disabled={switchingAccount || loadNotebooksAction.busy}
-                onClick={() => loadNotebooksAction.run()}
+                disabled={
+                  accountBusy || notebookPending.refresh || notebookPending.create || consoleBusy
+                }
+                onClick={() => void popupRuntime.runPromise(notebookWorkspace.refreshNotebooks())}
               >
-                {loadNotebooksAction.busy ? 'Loading…' : '↻'}
+                {notebookPending.refresh ? 'Loading…' : '↻'}
               </button>
             </div>
           )}
@@ -676,48 +405,55 @@ export function App() {
                 class="flex-1 rounded border border-gray-200 px-2 py-1 text-sm"
                 placeholder="New notebook title…"
                 value={newNotebookTitle}
-                onChange={(e) => setNewNotebookTitle(e.currentTarget.value)}
+                onChange={(e) => notebookWorkspace.editNewNotebookTitle(e.currentTarget.value)}
               />
               <button
                 type="button"
                 class="rounded border border-gray-300 px-2 py-1 text-gray-700 disabled:opacity-50"
                 disabled={
-                  switchingAccount || createNotebookAction.busy || newNotebookTitle.trim() === ''
+                  accountBusy ||
+                  notebookPending.refresh ||
+                  notebookPending.create ||
+                  consoleBusy ||
+                  newNotebookTitle.trim() === ''
                 }
-                onClick={() => createNotebookAction.run()}
+                onClick={() => void popupRuntime.runPromise(notebookWorkspace.createNotebook())}
               >
-                {createNotebookAction.busy ? 'Creating…' : 'Create'}
+                {notebookPending.create ? 'Creating…' : 'Create'}
               </button>
             </div>
           )}
-          {notebooksError && <p class="mt-1 text-xs text-red-600">{notebooksError}</p>}
           <button
             type="button"
             class="mt-2 w-full rounded bg-blue-600 px-3 py-2 text-white disabled:opacity-50"
-            disabled={switchingAccount || ingestAction.busy || selectedNotebookId === ''}
+            disabled={accountBusy || ingestAction.busy || selectedNotebookTarget === undefined}
             onClick={() => ingestAction.run(docs.map((doc) => doc.id))}
           >
             {ingestAction.busy ? 'Sending…' : 'Send to NotebookLM'}
           </button>
-          {ingestResult && (
+          {(queueSummary !== undefined || ingestError !== undefined) && (
             <div
-              class={`mt-1 text-xs ${ingestResult.failed > 0 || ingestResult.blocked > 0 ? 'text-red-600' : 'text-gray-500'}`}
+              class={`mt-1 text-xs ${ingestError !== undefined || (queueSummary?.failed ?? 0) > 0 || (queueSummary?.blocked ?? 0) > 0 ? 'text-red-600' : 'text-gray-500'}`}
             >
-              <p>
-                {ingestResult.queued} queued; continues in background
-                {ingestResult.failed > 0 && ` · ${ingestResult.failed} failed`}
-                {ingestResult.uncertain > 0 && ` · ${ingestResult.uncertain} need review`}
-                {ingestResult.blocked > 0 && ` · ${ingestResult.blocked} need a new target`}
-              </p>
-              {ingestResult.error && <p>{ingestResult.error}</p>}
-              {retryJobIds.length > 0 && (
+              {queueSummary !== undefined && (
+                <p>
+                  {queueSummary.queued} queued; continues in background
+                  {queueSummary.failed > 0 && ` · ${queueSummary.failed} failed`}
+                  {queueSummary.uncertain > 0 && ` · ${queueSummary.uncertain} need review`}
+                  {queueSummary.blocked > 0 && ` · ${queueSummary.blocked} need a new target`}
+                </p>
+              )}
+              {(ingestError ?? queueSummary?.error) !== undefined && (
+                <p>{ingestError ?? queueSummary?.error}</p>
+              )}
+              {(queueSummary?.retryJobIds.length ?? 0) > 0 && (
                 <button
                   type="button"
                   class="mt-1 rounded border border-gray-300 px-2 py-1 text-gray-700 disabled:opacity-50"
                   disabled={retryQueueAction.busy}
-                  onClick={() => retryQueueAction.run(retryJobIds)}
+                  onClick={() => retryQueueAction.run(queueSummary?.retryJobIds ?? [])}
                 >
-                  {ingestResult.uncertain > 0 ? 'Retry anyway' : 'Retry failed'}
+                  {queueSummary?.uncertain !== 0 ? 'Retry anyway' : 'Retry failed'}
                 </button>
               )}
             </div>
@@ -741,7 +477,7 @@ export function App() {
         class="mt-3"
         onToggle={(e) => {
           if (e.currentTarget.open && notebooks.length === 0 && settings.accounts.length > 0) {
-            loadNotebooksAction.run()
+            void popupRuntime.runPromise(notebookWorkspace.refreshNotebooks())
           }
         }}
       >
@@ -759,8 +495,8 @@ export function App() {
                 <select
                   class="flex-1 rounded border border-gray-200 px-2 py-1 text-sm"
                   value={selectedNotebookId}
-                  disabled={switchingAccount}
-                  onChange={(e) => setSelectedNotebookId(e.currentTarget.value)}
+                  disabled={accountBusy || notebookPending.create || consoleBusy}
+                  onChange={(e) => notebookWorkspace.selectNotebook(e.currentTarget.value)}
                 >
                   <option value="" disabled>
                     Choose a notebook…
@@ -774,33 +510,46 @@ export function App() {
                 <button
                   type="button"
                   class="rounded bg-blue-600 px-3 py-1 text-white disabled:opacity-50"
-                  disabled={scanConsoleAction.busy || switchingAccount || selectedNotebookId === ''}
-                  onClick={() => scanConsoleAction.run()}
+                  disabled={
+                    consoleBusy ||
+                    accountBusy ||
+                    notebookPending.refresh ||
+                    notebookPending.create ||
+                    selectedNotebookId === ''
+                  }
+                  onClick={() =>
+                    void popupRuntime.runPromise(notebookWorkspace.scanSourceConsole())
+                  }
                 >
-                  {scanConsoleAction.busy ? 'Scanning…' : 'Scan'}
+                  {sourceConsole.pending === 'scan' ? 'Scanning…' : 'Scan'}
                 </button>
               </div>
-              {consoleStatus && <p class="mt-1 text-xs text-gray-500">{consoleStatus}</p>}
-              {consoleScan && (
+              {sourceConsole.status && (
+                <p class="mt-1 text-xs text-gray-500">{sourceConsole.status}</p>
+              )}
+              {sourceConsole.scan && (
                 <div class="mt-2 space-y-2">
                   <p class="text-xs text-gray-500">
-                    {consoleScan.sources.length} sources · {consoleScan.duplicateCount} duplicate
-                    {consoleScan.duplicateCount === 1 ? '' : 's'} · {consoleScan.failed.length}{' '}
-                    failed
+                    {sourceConsole.scan.sources.length} sources ·{' '}
+                    {sourceConsole.scan.duplicateCount} duplicate
+                    {sourceConsole.scan.duplicateCount === 1 ? '' : 's'} ·{' '}
+                    {sourceConsole.scan.failed.length} failed
                   </p>
-                  {consoleScan.duplicateCount > 0 && (
+                  {sourceConsole.scan.duplicateCount > 0 && (
                     <button
                       type="button"
                       class="w-full rounded bg-red-600 px-3 py-2 text-white disabled:opacity-50"
-                      disabled={dedupeAction.busy || switchingAccount}
-                      onClick={() => dedupeAction.run()}
+                      disabled={consoleBusy || accountBusy}
+                      onClick={() =>
+                        void popupRuntime.runPromise(notebookWorkspace.removeSourceDuplicates())
+                      }
                     >
-                      {dedupeAction.busy
+                      {sourceConsole.pending === 'dedupe'
                         ? 'Removing…'
-                        : `Remove ${consoleScan.duplicateCount} duplicate${consoleScan.duplicateCount === 1 ? '' : 's'}`}
+                        : `Remove ${sourceConsole.scan.duplicateCount} duplicate${sourceConsole.scan.duplicateCount === 1 ? '' : 's'}`}
                     </button>
                   )}
-                  {consoleScan.duplicateGroups.map((group) => (
+                  {sourceConsole.scan.duplicateGroups.map((group) => (
                     <div key={group.key} class="rounded border border-gray-200 p-2 text-xs">
                       <div class="font-medium">Keep: {group.keep.title}</div>
                       <div class="text-gray-500">
@@ -808,7 +557,7 @@ export function App() {
                       </div>
                     </div>
                   ))}
-                  {consoleScan.failed.map((diagnosis) => (
+                  {sourceConsole.scan.failed.map((diagnosis) => (
                     <div
                       key={diagnosis.source.id}
                       class="rounded border border-red-200 p-2 text-xs"
@@ -819,17 +568,22 @@ export function App() {
                         <button
                           type="button"
                           class="mt-1 text-blue-600 disabled:opacity-50"
-                          disabled={retrySourceAction.busy || switchingAccount}
-                          onClick={() => retrySourceAction.run(diagnosis.source.id)}
+                          disabled={consoleBusy || accountBusy}
+                          onClick={() =>
+                            void popupRuntime.runPromise(
+                              notebookWorkspace.retrySource(diagnosis.source.id),
+                            )
+                          }
                         >
-                          Retry load
+                          {sourceConsole.pending === 'retry' ? 'Retrying…' : 'Retry load'}
                         </button>
                       )}
                     </div>
                   ))}
-                  {consoleScan.duplicateCount === 0 && consoleScan.failed.length === 0 && (
-                    <p class="text-xs text-gray-400">No duplicate or failed sources found.</p>
-                  )}
+                  {sourceConsole.scan.duplicateCount === 0 &&
+                    sourceConsole.scan.failed.length === 0 && (
+                      <p class="text-xs text-gray-400">No duplicate or failed sources found.</p>
+                    )}
                 </div>
               )}
             </>
@@ -849,6 +603,7 @@ export function App() {
             value={settings.driveClientId ?? ''}
             onChange={(e) => void updateDriveClientId(e.currentTarget.value)}
           />
+          {driveError && <p class="mt-1 text-xs text-red-600">{driveError}</p>}
           <p class="mt-1 text-xs text-gray-400">
             OAuth client (Chrome Extension type) from Google Cloud Console
           </p>

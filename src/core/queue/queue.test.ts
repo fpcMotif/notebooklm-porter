@@ -5,6 +5,7 @@ import {
   enqueueUnits,
   markInFlight,
   pickNext,
+  queueSnapshot,
   reapInterrupted,
   retryJob,
   settleRetryableFailure,
@@ -41,6 +42,21 @@ describe('ingest queue', () => {
     expect(second.jobs[0]?.docIds).toEqual(['reddit:1', 'reddit:2'])
   })
 
+  it('snapshots new delivery inputs and detaches read projections', () => {
+    const inputTarget = { ...target }
+    const inputUnit = unit()
+    const queued = enqueueUnits(emptyQueue(), inputTarget, [inputUnit], NOW)
+    const snapshot = queueSnapshot(queued)
+
+    inputTarget.notebookId = 'mutated'
+    inputUnit.title = 'Mutated'
+    snapshot.jobs[0]?.docIds.push('mutated')
+
+    expect(queued.jobs[0]?.target.notebookId).toBe('nb-1')
+    expect(queued.jobs[0]?.unit).toMatchObject({ title: 'Thread' })
+    expect(queued.jobs[0]?.docIds).toEqual(['reddit:1'])
+  })
+
   it('keeps a changed unit as a distinct delivery snapshot', () => {
     const first = enqueueUnits(emptyQueue(), target, [unit()], NOW)
     const next = enqueueUnits(
@@ -51,6 +67,16 @@ describe('ingest queue', () => {
     )
 
     expect(next.jobs).toHaveLength(2)
+  })
+
+  it('keeps delivery IDs distinct when target and unit segments contain separators', () => {
+    const firstTarget = { ...target, notebookId: 'nb:a' }
+    const separatorTarget = { ...target, notebookId: 'nb' }
+    let queue = enqueueUnits(emptyQueue(), firstTarget, [unit({ id: 'b' })], NOW)
+    queue = enqueueUnits(queue, separatorTarget, [unit({ id: 'a:b' })], NOW)
+
+    expect(queue.jobs).toHaveLength(2)
+    expect(queue.jobs[0]?.id).not.toBe(queue.jobs[1]?.id)
   })
 
   it('supersedes only safely unsent snapshots when a watched source changes', () => {
@@ -80,6 +106,17 @@ describe('ingest queue', () => {
     expect(superseded.jobs[0]?.status).toBe('uncertain')
   })
 
+  it('does not supersede a same-email notebook in another authuser slot', () => {
+    const initial = enqueueUnits(emptyQueue(), target, [unit()], NOW)
+    const otherSlot = { ...target, authuser: 1 }
+    const nextUnit = unit({ contentHash: 'hash-2', markdown: '# Updated' })
+
+    const superseded = supersedePendingUnitVersions(initial, otherSlot, [nextUnit])
+
+    expect(superseded.jobs).toHaveLength(1)
+    expect(superseded.jobs[0]?.target).toEqual(target)
+  })
+
   it('makes interrupted in-flight work uncertain rather than resending it', () => {
     const queued = enqueueUnits(emptyQueue(), target, [unit()], NOW)
     const inFlight = markInFlight(queued, queued.jobs[0]?.id ?? '', NOW)
@@ -97,6 +134,16 @@ describe('ingest queue', () => {
     expect(retrying.jobs[0]?.nextAttemptAt).toBe('2026-07-11T00:00:30.000Z')
     expect(pickNext(retrying, NOW)).toBeUndefined()
     expect(pickNext(retrying, '2026-07-11T00:00:30.000Z')?.status).toBe('retrying')
+  })
+
+  it('clears a prior retry error when work becomes in-flight again', () => {
+    const queued = enqueueUnits(emptyQueue(), target, [unit()], NOW)
+    const retrying = settleRetryableFailure(queued, queued.jobs[0]?.id ?? '', 'offline', NOW)
+    const inFlight = markInFlight(retrying, retrying.jobs[0]?.id ?? '', '2026-07-11T00:00:30.000Z')
+
+    expect(inFlight.jobs[0]?.status).toBe('inFlight')
+    expect(inFlight.jobs[0]?.nextAttemptAt).toBeUndefined()
+    expect(inFlight.jobs[0]?.lastError).toBeUndefined()
   })
 
   it('alternates due jobs across targets when one target has contiguous jobs', () => {
@@ -171,6 +218,45 @@ describe('ingest queue', () => {
     expect(reEnqueued.jobs[0]?.status).toBe('queued')
     expect(reEnqueued.jobs[0]?.attempts).toBe(0)
     expect(reEnqueued.jobs[0]?.lastError).toBeUndefined()
+    expect(reEnqueued.jobs[0]?.docIds).toEqual(['reddit:1', 'reddit:2'])
+  })
+
+  it('keeps a parked immutable target when the same account moves to another slot', () => {
+    const queued = enqueueUnits(emptyQueue(), target, [unit()], NOW)
+    const blocked = settleTerminalFailure(
+      queued,
+      queued.jobs[0]?.id ?? '',
+      'account changed',
+      NOW,
+      'blocked',
+    )
+    const movedTarget = { ...target, authuser: 1 }
+
+    const reEnqueued = enqueueUnits(blocked, movedTarget, [unit({ docId: 'reddit:2' })], NOW)
+
+    expect(reEnqueued.jobs).toHaveLength(2)
+    expect(reEnqueued.jobs[0]?.target).toEqual(target)
+    expect(reEnqueued.jobs[0]?.status).toBe('blocked')
+    expect(reEnqueued.jobs[1]?.target).toEqual(movedTarget)
+    expect(reEnqueued.jobs[1]?.status).toBe('queued')
+    expect(reEnqueued.jobs[1]?.docIds).toEqual(['reddit:2'])
+  })
+
+  it('matches a persisted legacy id by its full immutable delivery', () => {
+    const queued = enqueueUnits(emptyQueue(), target, [unit()], NOW)
+    const current = queued.jobs[0]
+    if (current === undefined) throw new Error('Expected queued fixture job')
+    const legacyId = 'f@example.com:nb-1:reddit:1:hash-1'
+    const legacy = {
+      ...queued,
+      jobs: [{ ...current, id: legacyId, status: 'uncertain' as const }],
+    }
+
+    const reEnqueued = enqueueUnits(legacy, target, [unit({ docId: 'reddit:2' })], NOW)
+
+    expect(reEnqueued.jobs).toHaveLength(1)
+    expect(reEnqueued.jobs[0]?.id).toBe(legacyId)
+    expect(reEnqueued.jobs[0]?.status).toBe('uncertain')
     expect(reEnqueued.jobs[0]?.docIds).toEqual(['reddit:1', 'reddit:2'])
   })
 })

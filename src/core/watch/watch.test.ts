@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import type { CaptureOptions } from '../adapters/types'
 import {
   disableWatch,
   emptyWatches,
@@ -50,15 +51,31 @@ describe('watch lifecycle', () => {
   })
 
   it('persists an explicit transcript enrichment preference', () => {
+    const captureOptions: CaptureOptions = { enrichTranscripts: true }
     const state = upsertWatch(emptyWatches(), {
       sourceDocId: 'youtube:PL1',
       sourceUrl: 'https://www.youtube.com/playlist?list=PL1',
       target,
       now: NOW,
-      captureOptions: { enrichTranscripts: true },
+      captureOptions,
     })
 
     expect(state.watches[0]?.captureOptions).toEqual({ enrichTranscripts: true })
+    expect(state.watches[0]?.captureOptions).not.toBe(captureOptions)
+    delete captureOptions.enrichTranscripts
+    expect(state.watches[0]?.captureOptions).toEqual({ enrichTranscripts: true })
+  })
+
+  it('omits an empty capture preference from canonical state', () => {
+    const state = upsertWatch(emptyWatches(), {
+      sourceDocId: 'youtube:PL1',
+      sourceUrl: 'https://www.youtube.com/playlist?list=PL1',
+      target,
+      now: NOW,
+      captureOptions: {},
+    })
+
+    expect(state.watches[0]?.captureOptions).toBeUndefined()
   })
 
   it('removes only the requested watch', () => {
@@ -84,6 +101,23 @@ describe('watch lifecycle', () => {
     })
 
     expect(removeWatchesForSourceDoc(second, 'reddit:one').watches).toEqual([])
+  })
+
+  it('keeps same-email watches in separate authuser slots', () => {
+    const first = create()
+    const otherSlot = { ...target, authuser: 1 }
+    const next = upsertWatch(first, {
+      sourceDocId: 'reddit:one',
+      sourceUrl: 'https://reddit.com/r/test/comments/one',
+      target: otherSlot,
+      now: NOW,
+    })
+
+    expect(next.watches).toHaveLength(2)
+    expect(next.watches.map((watch) => watch.id)).toEqual([
+      watchId('reddit:one', target),
+      watchId('reddit:one', otherSlot),
+    ])
   })
 })
 
@@ -128,16 +162,18 @@ describe('watch scheduling', () => {
     })
   })
 
-  it('projects only popup-safe watch fields', () => {
+  it('projects only popup-safe watch fields and detaches the target', () => {
     const state = create()
-    expect(watchSnapshot(state)).toEqual([
+    const snapshot = watchSnapshot(state)
+    expect(snapshot).toEqual([
       {
         id: watchId('reddit:one', target),
         sourceDocId: 'reddit:one',
-        notebookId: 'notebook-1',
+        target,
         status: 'active',
         nextRunAt: '2026-07-11T06:00:00.000Z',
       },
     ])
+    expect(snapshot[0]?.target).not.toBe(state.watches[0]?.target)
   })
 })

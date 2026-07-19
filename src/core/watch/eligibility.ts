@@ -1,4 +1,5 @@
-import { adapterForUrl } from '../adapters/registry'
+import { isResolvedUrlCapturable } from '../adapters/capture'
+import { resolveCapturable } from '../adapters/registry'
 import type { SourceDoc } from '../model/types'
 
 /** Kinds a watch may bind: sources that grow over time. A static video never changes. */
@@ -12,11 +13,11 @@ export const WATCHABLE_KINDS: ReadonlySet<SourceDoc['kind']> = new Set(['thread'
  */
 export function canWatchSource(doc: Pick<SourceDoc, 'site' | 'kind' | 'canonicalUrl'>): boolean {
   if (!WATCHABLE_KINDS.has(doc.kind)) return false
-  const adapter = adapterForUrl(doc.canonicalUrl)
+  const resolved = resolveCapturable(doc.canonicalUrl)
   return (
-    adapter !== undefined &&
-    adapter.id === doc.site &&
-    adapter.strategy.mode === 'url' &&
-    adapter.detect(doc.canonicalUrl)?.kind === doc.kind
+    resolved !== undefined &&
+    resolved.adapter.id === doc.site &&
+    isResolvedUrlCapturable(resolved) &&
+    resolved.capturable.kind === doc.kind
   )
 }

@@ -1,10 +1,11 @@
 import { assert, describe, it } from '@effect/vitest'
 import { Effect, Layer } from 'effect'
+import { notebookTargetKey } from '../accounts/ownership'
 import realMixPanel from '../adapters/youtube/fixture-mix-panel.json'
 import { alarmsTest, debugLogTest, httpTest, kvTest } from '../fx/testing'
 import { QUEUE_ALARM } from '../queue/queue'
 import { loadQueue } from '../queue/store'
-import { contentHash } from '../store/ledger'
+import { contentHash, LEDGER_STORAGE_KEY } from '../store/ledger'
 import { loadWatches } from './store'
 import { resyncOneDueWatch } from './resync'
 import { emptyWatches, upsertWatch, WATCH_ALARM } from './watch'
@@ -38,7 +39,7 @@ function layer(
   ledger: Record<string, unknown> = {},
 ) {
   return Layer.mergeAll(
-    kvTest({ 'porter/watch/v1': watches, 'porter/ledger': ledger }),
+    kvTest({ 'porter/watch/v1': watches, [LEDGER_STORAGE_KEY]: ledger }),
     debugLogTest(),
     httpTest(http),
     alarmsTest({
@@ -126,6 +127,23 @@ describe('resyncOneDueWatch', () => {
     }),
   )
 
+  it.effect('disables an invalid same-host URL without calling Http', () =>
+    Effect.gen(function* () {
+      const state = dueWatch('https://news.ycombinator.com/newest')
+      const requests: Array<{ url: string }> = []
+      const testLayer = Layer.mergeAll(
+        kvTest({ 'porter/watch/v1': state }),
+        debugLogTest(),
+        httpTest({}, requests),
+        alarmsTest(),
+      )
+      const result = yield* resyncOneDueWatch({ now: NOW }).pipe(Effect.provide(testLayer))
+
+      assert.deepStrictEqual(result, { status: 'disabled', watchId: firstWatchId(state) })
+      assert.deepStrictEqual(requests, [])
+    }),
+  )
+
   it.effect('arms the next watch when nothing is due', () =>
     Effect.gen(function* () {
       const alarms: Array<[string, number | 'clear']> = []
@@ -159,7 +177,7 @@ describe('resyncOneDueWatch — ledger dedup', () => {
 
         const alarms: Array<[string, number | 'clear']> = []
         const ledger = {
-          [target.notebookId]: {
+          [notebookTargetKey(target)]: {
             [unit.id]: { contentHash: unit.contentHash, lastSynced: EARLIER },
           },
         }
@@ -190,7 +208,7 @@ describe('resyncOneDueWatch — ledger dedup', () => {
         throw new Error('expected three fixture video ids')
       }
       const ledger = {
-        [target.notebookId]: {
+        [notebookTargetKey(target)]: {
           [videoUnitId(syncedVideoId)]: {
             contentHash: videoContentHash(syncedVideoId),
             lastSynced: EARLIER,
@@ -199,7 +217,7 @@ describe('resyncOneDueWatch — ledger dedup', () => {
       }
       const alarms: Array<[string, number | 'clear']> = []
       const testLayer = Layer.mergeAll(
-        kvTest({ 'porter/watch/v1': mixWatch(), 'porter/ledger': ledger }),
+        kvTest({ 'porter/watch/v1': mixWatch(), [LEDGER_STORAGE_KEY]: ledger }),
         debugLogTest(),
         httpTest({ [MIX_FETCH_URL]: mixHtml() }),
         alarmsTest({

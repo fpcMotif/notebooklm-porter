@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
+  createXThreadEvidence,
   isGraphqlTeeEventDetail,
   isXThreadGraphqlUrl,
-  preferCompleteGraphqlThread,
   tweetsForStatus,
   tweetsFromGraphql,
 } from './graphql'
+import type { RawTweet } from './extract'
 
 function tweet(
   id: string,
@@ -98,6 +99,23 @@ const payload = {
   },
 }
 
+function detail(bodyPayload: unknown): { url: string; body: string } {
+  return {
+    url: 'https://x.com/i/api/graphql/id/TweetDetail',
+    body: JSON.stringify(bodyPayload),
+  }
+}
+
+function rawTweet(id: string, text: string, input: Partial<RawTweet> = {}): RawTweet {
+  return {
+    id,
+    authorHandle: 'alice',
+    authorName: 'Alice',
+    text,
+    ...input,
+  }
+}
+
 describe('X GraphQL tee contracts', () => {
   it('limits the passive tee to page-owned thread result operations', () => {
     expect(isXThreadGraphqlUrl('https://x.com/i/api/graphql/id/TweetDetail?variables={}')).toBe(
@@ -135,10 +153,12 @@ describe('X GraphQL tee contracts', () => {
     })
   })
 
-  it('uses observed GraphQL rows only when the requested root status is present', () => {
+  it('uses observed GraphQL rows when the requested root or matching conversation is present', () => {
     const tweets = tweetsFromGraphql(payload)
+    const rootMissing = tweets.filter((row) => row.id !== '1000')
 
     expect(tweetsForStatus(tweets, '1000').map((row) => row.id)).toEqual(['1000', '1001'])
+    expect(tweetsForStatus(rootMissing, '1000').map((row) => row.id)).toEqual(['1001'])
     expect(tweetsForStatus(tweets, 'missing')).toEqual([])
   })
 
@@ -200,21 +220,276 @@ describe('X GraphQL tee contracts', () => {
     expect(tweetsForStatus(tweets, '1002').map((row) => row.id)).toEqual(['1000', '1002', '1003'])
   })
 
-  it('does not replace a fuller DOM capture with a partial GraphQL observation', () => {
-    const graphTweets = tweetsFromGraphql({
-      data: {
-        result: tweet('1002', {
-          handle: 'alice',
-          name: 'Alice',
-          text: 'Requested reply',
-          conversationId: '1000',
-        }),
-      },
-    })
-    const domTweets = tweetsFromGraphql(payload)
-
-    expect(preferCompleteGraphqlThread(graphTweets, domTweets).map((row) => row.id)).toEqual(
-      domTweets.map((row) => row.id),
+  it('enriches matching DOM rows without shrinking a partial observation', () => {
+    const evidence = createXThreadEvidence()
+    evidence.observe(
+      detail({
+        data: {
+          result: tweet('1000', {
+            handle: 'alice',
+            name: 'Alice',
+            text: 'preview',
+            longText: 'Complete long-form text',
+          }),
+        },
+      }),
     )
+    const domTweets = [
+      rawTweet('1000', 'preview'),
+      rawTweet('1001', 'DOM-only reply', { conversationId: '1000' }),
+    ]
+
+    expect(evidence.resolve('1000', domTweets)).toEqual([
+      rawTweet('1000', 'Complete long-form text', {
+        timestamp: '2018-10-10T20:19:24.000Z',
+        conversationId: '1000',
+        links: ['https://example.com/read'],
+      }),
+      domTweets[1],
+    ])
+  })
+
+  it('uses GraphQL order only with full DOM coverage and never downgrades DOM evidence', () => {
+    const evidence = createXThreadEvidence()
+    evidence.observe(
+      detail({
+        data: {
+          rows: [
+            tweet('1001', {
+              handle: 'alice',
+              name: 'Alice',
+              text: '',
+              conversationId: '1000',
+            }),
+            tweet('1002', {
+              handle: 'alice',
+              name: 'Alice',
+              text: 'Graph-only middle',
+              conversationId: '1000',
+            }),
+            tweet('1000', {
+              handle: 'alice',
+              name: 'Alice',
+              text: 'root',
+            }),
+          ],
+        },
+      }),
+    )
+    const domTweets = [
+      rawTweet('1000', 'DOM root'),
+      rawTweet('1001', 'Better DOM reply', {
+        conversationId: '1000',
+        quotedAuthorHandle: 'bob',
+        quotedText: 'Long DOM quote',
+        links: ['https://dom.example/read'],
+        media: [{ kind: 'image', url: 'https://dom.example/image.jpg', alt: 'DOM alt' }],
+      }),
+    ]
+
+    const resolved = evidence.resolve('1000', domTweets)
+
+    expect(resolved.map((row) => row.id)).toEqual(['1001', '1002', '1000'])
+    expect(resolved[0]).toMatchObject({
+      text: 'Better DOM reply',
+      quotedAuthorHandle: 'bob',
+      quotedText: 'Long DOM quote',
+      links: ['https://dom.example/read', 'https://example.com/read'],
+      media: [{ kind: 'image', url: 'https://dom.example/image.jpg', alt: 'DOM alt' }],
+    })
+    expect(resolved[2]?.text).toBe('DOM root')
+  })
+
+  it('replaces a partial observation order with a more complete conversation order', () => {
+    const evidence = createXThreadEvidence()
+    evidence.observe(
+      detail({
+        data: {
+          rows: [
+            tweet('1001', {
+              handle: 'alice',
+              name: 'Alice',
+              text: 'Reply',
+              conversationId: '1000',
+            }),
+            tweet('1000', { handle: 'alice', name: 'Alice', text: 'Root' }),
+          ],
+        },
+      }),
+    )
+    evidence.observe(
+      detail({
+        data: {
+          rows: [
+            tweet('1000', { handle: 'alice', name: 'Alice', text: 'Root' }),
+            tweet('1001', {
+              handle: 'alice',
+              name: 'Alice',
+              text: 'Reply',
+              conversationId: '1000',
+            }),
+            tweet('1002', {
+              handle: 'alice',
+              name: 'Alice',
+              text: 'Graph-only reply',
+              conversationId: '1000',
+            }),
+          ],
+        },
+      }),
+    )
+
+    const resolved = evidence.resolve('1000', [
+      rawTweet('1000', 'DOM root'),
+      rawTweet('1001', 'DOM reply', { conversationId: '1000' }),
+    ])
+
+    expect(resolved.map((row) => row.id)).toEqual(['1000', '1001', '1002'])
+  })
+
+  it('merges a smaller later observation without replacing the best complete order', () => {
+    const evidence = createXThreadEvidence()
+    evidence.observe(
+      detail({
+        data: {
+          rows: [
+            tweet('1000', { handle: 'alice', name: 'Alice', text: 'Root' }),
+            tweet('1001', {
+              handle: 'alice',
+              name: 'Alice',
+              text: 'Reply',
+              conversationId: '1000',
+            }),
+            tweet('1002', {
+              handle: 'alice',
+              name: 'Alice',
+              text: 'Last reply',
+              conversationId: '1000',
+            }),
+          ],
+        },
+      }),
+    )
+    evidence.observe(
+      detail({
+        data: {
+          result: tweet('1001', {
+            handle: 'alice',
+            name: 'Alice',
+            text: 'A much longer enriched reply',
+            conversationId: '1000',
+            media: true,
+          }),
+        },
+      }),
+    )
+
+    const resolved = evidence.resolve('1000', [
+      rawTweet('1000', 'DOM root'),
+      rawTweet('1001', 'DOM reply', { conversationId: '1000' }),
+    ])
+
+    expect(resolved.map((row) => row.id)).toEqual(['1000', '1001', '1002'])
+    expect(resolved[1]).toMatchObject({
+      text: 'A much longer enriched reply',
+      media: [
+        {
+          kind: 'image',
+          url: 'https://pbs.twimg.com/media/example.jpg',
+          alt: 'Example image',
+        },
+      ],
+    })
+  })
+
+  it('lets an equally complete later observation replace conversation order', () => {
+    const evidence = createXThreadEvidence()
+    const first = [
+      tweet('1000', { handle: 'alice', name: 'Alice', text: 'Root' }),
+      tweet('1001', {
+        handle: 'alice',
+        name: 'Alice',
+        text: 'Reply',
+        conversationId: '1000',
+      }),
+      tweet('1002', {
+        handle: 'alice',
+        name: 'Alice',
+        text: 'Last reply',
+        conversationId: '1000',
+      }),
+    ]
+    evidence.observe(detail({ data: { rows: first } }))
+    evidence.observe(detail({ data: { rows: [first[2], first[0], first[1]] } }))
+
+    const resolved = evidence.resolve('1000', [
+      rawTweet('1000', 'DOM root'),
+      rawTweet('1001', 'DOM reply', { conversationId: '1000' }),
+    ])
+
+    expect(resolved.map((row) => row.id)).toEqual(['1002', '1000', '1001'])
+  })
+
+  it('merges repeated observations instead of keeping only the longest response', () => {
+    const evidence = createXThreadEvidence()
+    evidence.observe(
+      detail({
+        data: {
+          result: tweet('1000', {
+            handle: 'alice',
+            name: 'Alice',
+            text: 'A much longer first observation',
+          }),
+        },
+      }),
+    )
+    evidence.observe(
+      detail({
+        data: {
+          result: tweet('1000', {
+            handle: 'alice',
+            name: 'Alice',
+            text: 'short',
+            conversationId: 'conflicting-root',
+            media: true,
+          }),
+        },
+      }),
+    )
+
+    expect(evidence.resolve('1000', [rawTweet('1000', 'DOM')])[0]).toMatchObject({
+      text: 'A much longer first observation',
+      conversationId: '1000',
+      media: [
+        {
+          kind: 'image',
+          url: 'https://pbs.twimg.com/media/example.jpg',
+          alt: 'Example image',
+        },
+      ],
+    })
+  })
+
+  it('ignores malformed observations and evicts the oldest new id at its fixed bound', () => {
+    const evidence = createXThreadEvidence()
+    evidence.observe({ url: 'https://x.com/home', body: '{}' })
+    evidence.observe({ url: 'https://x.com/i/api/graphql/id/TweetDetail', body: '{' })
+    evidence.observe(
+      detail({
+        data: {
+          rows: Array.from({ length: 1001 }, (_, index) =>
+            tweet(String(1000 + index), {
+              handle: 'alice',
+              name: 'Alice',
+              text: `Graph text ${index}`,
+            }),
+          ),
+        },
+      }),
+    )
+
+    const dom = [rawTweet('1000', 'DOM floor')]
+    expect(evidence.resolve('1000', dom)).toEqual(dom)
+    expect(evidence.resolve('2000', [rawTweet('2000', 'DOM')])[0]?.text).toBe('Graph text 1000')
   })
 })

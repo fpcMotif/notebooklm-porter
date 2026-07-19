@@ -22,6 +22,8 @@ describe('standaloneYoutubeVideo', () => {
       standaloneYoutubeVideo('https://www.youtube.com/watch?v=abcdefghijk&list=PL123'),
     ).toBeUndefined()
     expect(standaloneYoutubeVideo('https://www.youtube.com/watch?v=short')).toBeUndefined()
+    expect(standaloneYoutubeVideo('http://www.youtube.com/watch?v=abcdefghijk')).toBeUndefined()
+    expect(standaloneYoutubeVideo('ftp://youtu.be/abcdefghijk')).toBeUndefined()
   })
 })
 

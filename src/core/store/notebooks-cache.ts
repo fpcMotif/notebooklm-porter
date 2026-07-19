@@ -3,15 +3,11 @@ import type { StorageError } from '../fx/errors'
 import { isRecord } from '../fx/guards'
 import { kvSlot } from '../fx/kv-slot'
 import { Kv } from '../fx/services'
-
-export interface CachedNotebook {
-  id: string
-  title: string
-}
+import type { NotebookMeta } from '../notebooks/model'
 
 export interface NotebookCacheEntry {
   email: string
-  notebooks: CachedNotebook[]
+  notebooks: NotebookMeta[]
   refreshedAt: string
 }
 
@@ -57,7 +53,7 @@ export function readCachedNotebooks(
   cache: NotebookCache,
   authuser: number,
   email: string,
-): CachedNotebook[] | undefined {
+): NotebookMeta[] | undefined {
   const entry = cache.entries[entryKey(authuser)]
   if (entry === undefined || entry.email !== email) return undefined
   return entry.notebooks.map(({ id, title }) => ({ id, title }))
@@ -69,7 +65,7 @@ export function cacheNotebooks(
   input: {
     authuser: number
     email: string
-    notebooks: readonly CachedNotebook[]
+    notebooks: readonly NotebookMeta[]
     refreshedAt: string
   },
 ): NotebookCache {

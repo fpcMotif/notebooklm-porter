@@ -91,6 +91,13 @@ The adapter registry (`src/core/adapters/registry.ts`) is the single source of t
 adding a platform is one entry there, and `wxt.config.ts` derives all
 `host_permissions` from it. No manifest is hand-edited per platform.
 
+`adapterForUrl` only identifies a host. `resolveCapturable` pairs that adapter with
+its one URL-only detection result before capture. A `Capturable` carries the adapter's
+opaque native identity: playlist/list or video ID for YouTube; post/item/status ID for
+threads. Capture re-resolves the returned capture URL through the registry, then rejects
+a changed adapter, kind, site, or identity before storage. This rejects same-site SPA
+navigation races and foreign-host lookalikes without platform branches outside adapters.
+
 ## 4. NotebookLM ingestion (RPC-first, layered fallback)
 
 **Decision:** RPC-first (per approval), with automatic degradation. The internal RPC
@@ -235,7 +242,9 @@ Already implemented in `src/core/model/types.ts`. Key shapes:
 - `Thread` / `Playlist` — carry a `truncated` flag so a partial capture is never
   silently presented as complete (NBLM answers would otherwise treat a fragment as whole).
 - `SourceDoc` — the stored unit: `id = "<site>:<nativeId>"` (the dedup key), plus
-  `markdown`, `jsonl`, `wordCount`, `truncated`, `capturedAt`.
+  `markdown`, `jsonl`, `wordCount`, `truncated`, `capturedAt`. Playlist documents also
+  persist a typed `playlistVideos` capture snapshot. Ingest reads that snapshot only;
+  JSONL remains export-only.
 
 ## 7. Formatting (structure-preserving — differentiator)
 

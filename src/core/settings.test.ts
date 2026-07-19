@@ -3,6 +3,8 @@ import { Effect } from 'effect'
 import { kvTest } from './fx/testing'
 import {
   DEFAULT_SETTINGS,
+  decodeSettingsPatch,
+  decodeStoredSettings,
   getSettings,
   notebookTargetPatch,
   resolveNotebookTarget,
@@ -10,6 +12,66 @@ import {
 } from './settings'
 
 describe('settings', () => {
+  it('strictly decodes complete settings patches into fresh values', () => {
+    const input = {
+      nblmAuthuser: 2,
+      accounts: [{ authuser: 2, email: 'two@example.com' }],
+      notebookTargets: { reddit: 'nb-reddit' },
+      driveClientId: '',
+    }
+
+    const patch = decodeSettingsPatch(input)
+
+    assert.deepStrictEqual(patch, input)
+    assert.notStrictEqual(patch?.accounts, input.accounts)
+    assert.notStrictEqual(patch?.notebookTargets, input.notebookTargets)
+  })
+
+  it('rejects malformed, unknown, and explicitly undefined patch fields', () => {
+    assert.isUndefined(decodeSettingsPatch([]))
+    assert.deepStrictEqual(decodeSettingsPatch({}), {})
+    assert.isUndefined(decodeSettingsPatch({ unknown: true }))
+    assert.isUndefined(decodeSettingsPatch({ nblmAuthuser: undefined }))
+    assert.isUndefined(decodeSettingsPatch({ nblmAuthuser: -1 }))
+    assert.isUndefined(decodeSettingsPatch({ accounts: [{ authuser: 0, email: '' }] }))
+    assert.isUndefined(decodeSettingsPatch({ notebookTargets: { unknown: 'nb-1' } }))
+    assert.isUndefined(decodeSettingsPatch({ notebookTargets: { reddit: '' } }))
+    assert.isUndefined(decodeSettingsPatch({ driveClientId: undefined }))
+  })
+
+  it('recovers valid persisted settings siblings and drops malformed values', () => {
+    const stored = decodeStoredSettings({
+      nblmAuthuser: -1,
+      accounts: [
+        { authuser: 1, email: 'one@example.com' },
+        { authuser: -1, email: 'bad@example.com' },
+        { authuser: 2, email: '   ' },
+        { authuser: 3, email: 'three@example.com', extra: true },
+      ],
+      notebookTargets: { reddit: 'nb-reddit', unknown: 'nb-unknown', youtube: '' },
+      driveClientId: 42,
+      unknown: true,
+    })
+
+    assert.deepStrictEqual(stored, {
+      nblmAuthuser: 0,
+      accounts: [
+        { authuser: 1, email: 'one@example.com' },
+        { authuser: 3, email: 'three@example.com' },
+      ],
+      notebookTargets: { reddit: 'nb-reddit' },
+    })
+  })
+
+  it('creates fresh default collections and rejects inherited patches', () => {
+    const first = decodeStoredSettings(undefined)
+    const second = decodeStoredSettings(undefined)
+
+    assert.notStrictEqual(first.accounts, second.accounts)
+    assert.notStrictEqual(first.notebookTargets, second.notebookTargets)
+    assert.isUndefined(decodeSettingsPatch(Object.create({ nblmAuthuser: 1 }) as unknown))
+  })
+
   it.effect('getSettings returns defaults when nothing is stored', () =>
     Effect.gen(function* () {
       const settings = yield* getSettings()

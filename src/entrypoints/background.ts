@@ -5,68 +5,33 @@ import {
   isContextMenuId,
 } from '../core/context-menu/handler'
 import { porterRuntime } from '../core/fx/runtime'
-import { isPorterMessage } from '../core/messaging'
+import { decodePorterMessage } from '../core/messaging'
 import { drainQueue } from '../core/queue/drain'
 import { QUEUE_ALARM } from '../core/queue/queue'
-import {
-  domainsForMessage,
-  handlePorterMessage,
-  LANE_ORDER,
-  type StorageDomain,
-} from '../core/router'
+import { domainsForMessage, handlePorterMessage, LANE_ORDER } from '../core/router'
+import { makeStorageLaneScheduler } from '../core/storage-lanes'
 import { resyncOneDueWatch } from '../core/watch/resync'
 import { WATCH_ALARM } from '../core/watch/watch'
 
-/** A promise-chain mutex over one storage domain. */
-type Lane = <A>(run: () => Promise<A>) => Promise<A>
-
-/**
- * One serialization lane. A long network capture only holds the `docs` lane,
- * so durable queue drains (the `queue` lane) keep firing on their alarm
- * instead of queuing behind it.
- */
-function makeLane(): Lane {
-  let tail: Promise<void> = Promise.resolve()
-  return (run) => {
-    const next = tail.then(run, run)
-    tail = next.then(
-      () => undefined,
-      () => undefined,
-    )
-    return next
-  }
-}
-
 export default defineBackground(() => {
-  const lanes: Record<StorageDomain, Lane> = {
-    docs: makeLane(),
-    watches: makeLane(),
-    queue: makeLane(),
-    settings: makeLane(),
-  }
-  // Hold every needed lane, acquired outermost-first in LANE_ORDER (see
-  // core/router.ts's MESSAGE_DOMAINS for which messages need which lanes).
-  const serialize = <A>(domains: readonly StorageDomain[], run: () => Promise<A>): Promise<A> =>
-    LANE_ORDER.filter((domain) => domains.includes(domain)).reduceRight<() => Promise<A>>(
-      (acc, domain) => () => lanes[domain](acc),
-      run,
-    )()
+  // A long capture holds only `docs`; disjoint queue drains can keep firing.
+  const storageLanes = makeStorageLaneScheduler(LANE_ORDER)
 
   const drainOnce = () => {
-    void serialize(['queue'], () => porterRuntime.runPromise(drainQueue())).catch(
-      (err: unknown) => {
+    void storageLanes
+      .run(['queue'], () => porterRuntime.runPromise(drainQueue()))
+      .catch((err: unknown) => {
         console.error('[porter] queue drain died', err)
         dbg('bg', 'queue drain died', { error: String(err) })
-      },
-    )
+      })
   }
   const resyncOnce = () => {
-    void serialize(['docs', 'watches', 'queue'], () =>
-      porterRuntime.runPromise(resyncOneDueWatch()),
-    ).catch((err: unknown) => {
-      console.error('[porter] watch resync died', err)
-      dbg('bg', 'watch resync died', { error: String(err) })
-    })
+    void storageLanes
+      .run(['docs', 'watches', 'queue'], () => porterRuntime.runPromise(resyncOneDueWatch()))
+      .catch((err: unknown) => {
+        console.error('[porter] watch resync died', err)
+        dbg('bg', 'watch resync died', { error: String(err) })
+      })
   }
 
   browser.alarms.onAlarm.addListener((alarm) => {
@@ -103,18 +68,19 @@ export default defineBackground(() => {
   browser.contextMenus.onClicked.addListener((info, tab) => {
     const menuId = info.menuItemId
     if (!isContextMenuId(menuId)) return
-    void serialize(['docs'], () =>
-      porterRuntime.runPromise(
-        captureContextMenuClick({
-          menuId,
-          ...(tab?.id !== undefined ? { tabId: tab.id } : {}),
-          ...(info.pageUrl !== undefined ? { pageUrl: info.pageUrl } : {}),
-          ...(tab?.title !== undefined ? { pageTitle: tab.title } : {}),
-          ...(info.selectionText !== undefined ? { selectionText: info.selectionText } : {}),
-          ...(info.linkUrl !== undefined ? { linkUrl: info.linkUrl } : {}),
-        }),
-      ),
-    )
+    void storageLanes
+      .run(['docs'], () =>
+        porterRuntime.runPromise(
+          captureContextMenuClick({
+            menuId,
+            ...(tab?.id !== undefined ? { tabId: tab.id } : {}),
+            ...(info.pageUrl !== undefined ? { pageUrl: info.pageUrl } : {}),
+            ...(tab?.title !== undefined ? { pageTitle: tab.title } : {}),
+            ...(info.selectionText !== undefined ? { selectionText: info.selectionText } : {}),
+            ...(info.linkUrl !== undefined ? { linkUrl: info.linkUrl } : {}),
+          }),
+        ),
+      )
       .then((doc) => {
         if (doc !== undefined) dbg('bg', 'context-menu capture stored', { docId: doc.id })
         return undefined
@@ -126,15 +92,16 @@ export default defineBackground(() => {
   })
 
   browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    if (!isPorterMessage(message)) return
-    const run = () => porterRuntime.runPromise(handlePorterMessage(message))
-    const domains = domainsForMessage(message.type)
-    const messagePromise = domains.length > 0 ? serialize(domains, run) : run()
+    const decoded = decodePorterMessage(message)
+    if (decoded === undefined) return
+    const run = () => porterRuntime.runPromise(handlePorterMessage(decoded))
+    const domains = domainsForMessage(decoded.type)
+    const messagePromise = domains.length > 0 ? storageLanes.run(domains, run) : run()
     messagePromise.then(sendResponse).catch((err: unknown) => {
       // Defects only — typed failures are flattened inside handlePorterMessage.
       const detail = err instanceof Error && err.stack ? err.stack : err
-      console.error('[porter]', message.type, detail)
-      dbg('bg', `${message.type} died`, {
+      console.error('[porter]', decoded.type, detail)
+      dbg('bg', `${decoded.type} died`, {
         error: String(err),
         ...(err instanceof Error && err.stack !== undefined ? { stack: err.stack } : {}),
       })

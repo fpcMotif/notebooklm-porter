@@ -1,10 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import {
-  duplicateRemovalIds,
-  findDuplicateGroups,
-  normalizeSourceUrl,
-  sourceDedupeKey,
-} from './dedup'
+import { duplicateRemovalIds, findDuplicateGroups, sourceDedupeKey } from './dedup'
 import type { NotebookSource, SourceKind, SourceLoadStatus } from './model'
 
 function source(id: string, over: Partial<Omit<NotebookSource, 'id'>> = {}): NotebookSource {
@@ -20,100 +15,90 @@ function source(id: string, over: Partial<Omit<NotebookSource, 'id'>> = {}): Not
   }
 }
 
-describe('normalizeSourceUrl', () => {
-  it('collapses every YouTube URL form to the video identity', () => {
-    const key = 'youtube:dQw4w9WgXcQ'
-    expect(normalizeSourceUrl('https://www.youtube.com/watch?v=dQw4w9WgXcQ')).toBe(key)
-    expect(normalizeSourceUrl('https://youtu.be/dQw4w9WgXcQ')).toBe(key)
-    expect(normalizeSourceUrl('https://www.youtube.com/shorts/dQw4w9WgXcQ')).toBe(key)
-    expect(normalizeSourceUrl('https://m.youtube.com/watch?v=dQw4w9WgXcQ&list=PLabc')).toBe(key)
-  })
-
-  it('strips tracking params and sorts the rest', () => {
-    expect(normalizeSourceUrl('https://example.com/post?utm_source=x&b=2&a=1&fbclid=zzz')).toBe(
-      'example.com/post?a=1&b=2',
-    )
-  })
-
-  it('drops www, fragment, and trailing slash', () => {
-    expect(normalizeSourceUrl('https://www.example.com/a/b/#section')).toBe('example.com/a/b')
-    expect(normalizeSourceUrl('https://example.com/')).toBe('example.com/')
-  })
-
-  it('treats two links differing only by tracking noise as one key', () => {
-    expect(normalizeSourceUrl('https://news.site/story?utm_campaign=a')).toBe(
-      normalizeSourceUrl('https://news.site/story?igshid=b'),
-    )
-  })
-
-  it('falls back to a trimmed lowercase form for non-URL strings', () => {
-    expect(normalizeSourceUrl('  Not A URL  ')).toBe('not a url')
-  })
-})
-
 describe('sourceDedupeKey', () => {
-  it('keys on the normalized URL when present', () => {
+  it('keys only validated YouTube video URLs, including playlist context', () => {
     expect(sourceDedupeKey(source('1', { url: 'https://youtu.be/dQw4w9WgXcQ' }))).toBe(
-      'url:youtube:dQw4w9WgXcQ',
+      'youtube:dQw4w9WgXcQ',
     )
+    expect(
+      sourceDedupeKey(
+        source('2', { url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLabc' }),
+      ),
+    ).toBe('youtube:dQw4w9WgXcQ')
   })
 
-  it('keys on the normalized title when there is no URL', () => {
-    expect(sourceDedupeKey(source('1', { title: '  Pasted Notes  ', kind: 'pasted_text' }))).toBe(
-      'title:pasted notes',
+  it('has no key without a validated YouTube video URL', () => {
+    expect(sourceDedupeKey(source('missing', { title: 'Pasted Notes', kind: 'pasted_text' }))).toBe(
+      undefined,
+    )
+    expect(sourceDedupeKey(source('blank', { url: '   ' }))).toBe(undefined)
+    expect(sourceDedupeKey(source('malformed', { url: 'not a URL' }))).toBe(undefined)
+    expect(sourceDedupeKey(source('ftp', { url: 'ftp://example.com/file' }))).toBe(undefined)
+    expect(sourceDedupeKey(source('http-youtube', { url: 'http://youtu.be/dQw4w9WgXcQ' }))).toBe(
+      undefined,
+    )
+    expect(sourceDedupeKey(source('ftp-youtube', { url: 'ftp://youtu.be/dQw4w9WgXcQ' }))).toBe(
+      undefined,
+    )
+    expect(sourceDedupeKey(source('generic', { url: 'https://example.com/article' }))).toBe(
+      undefined,
     )
   })
 })
 
 describe('findDuplicateGroups', () => {
-  it('groups sources that share a normalized URL', () => {
+  it('groups YouTube watch, short, and shortened URLs by video identity', () => {
     const sources = [
       source('a', { url: 'https://youtube.com/watch?v=dQw4w9WgXcQ' }),
       source('b', { url: 'https://youtu.be/dQw4w9WgXcQ' }),
-      source('c', { url: 'https://other.com/x' }),
+      source('c', { url: 'https://www.youtube.com/shorts/dQw4w9WgXcQ' }),
+      source('d', { url: 'https://m.youtube.com/watch?v=dQw4w9WgXcQ&list=PLabc' }),
     ]
     const groups = findDuplicateGroups(sources)
     expect(groups).toHaveLength(1)
-    expect(groups[0]?.remove.map((s) => s.id)).toEqual(['b'])
+    expect(groups[0]?.remove.map((s) => s.id)).toEqual(['b', 'c', 'd'])
     expect(groups[0]?.keep.id).toBe('a')
   })
 
-  it('keeps a ready copy and removes the broken duplicate', () => {
+  it('does not group the same generic URL', () => {
     const sources = [
-      source('bad', { url: 'https://example.com/x', status: 'error' }),
-      source('good', { url: 'https://example.com/x', status: 'ready' }),
+      source('first', { url: 'https://example.com/article' }),
+      source('second', { url: 'https://example.com/article' }),
     ]
-    const groups = findDuplicateGroups(sources)
-    expect(groups[0]?.keep.id).toBe('good')
-    expect(groups[0]?.remove.map((s) => s.id)).toEqual(['bad'])
-  })
-
-  it('ignores unique sources', () => {
-    const sources = [source('a', { url: 'https://a.com' }), source('b', { url: 'https://b.com' })]
     expect(findDuplicateGroups(sources)).toEqual([])
   })
 
-  it('dedupes URL-less sources by title', () => {
+  it('does not group generic URL normalizations', () => {
+    const variants = [
+      'http://example.com/article',
+      'https://example.com/article',
+      'https://www.example.com/article',
+      'https://example.com/article/',
+      'https://example.com/article#comments',
+      'https://example.com/article?a=1&b=2',
+      'https://example.com/article?b=2&a=1',
+      'https://example.com/article?utm_source=newsletter',
+    ]
+    const sources = variants.map((url, index) => source(`source-${index}`, { url }))
+    expect(findDuplicateGroups(sources)).toEqual([])
+  })
+
+  it('does not group same-title sources without canonical URLs', () => {
     const sources = [
       source('a', { title: 'Notes', kind: 'pasted_text' }),
       source('b', { title: 'notes', kind: 'pasted_text' }),
       source('c', { title: 'Other', kind: 'pasted_text' }),
     ]
-    const groups = findDuplicateGroups(sources)
-    expect(groups).toHaveLength(1)
-    expect(groups[0]?.remove.map((s) => s.id)).toEqual(['b'])
+    expect(findDuplicateGroups(sources)).toEqual([])
   })
 
-  it('returns groups in first-appearance order and flattens removal ids', () => {
+  it('keeps a ready YouTube source and removes the broken duplicate', () => {
     const sources = [
-      source('a1', { url: 'https://a.com' }),
-      source('b1', { url: 'https://b.com' }),
-      source('a2', { url: 'https://a.com' }),
-      source('b2', { url: 'https://b.com' }),
-      source('b3', { url: 'https://b.com' }),
+      source('bad', { url: 'https://youtu.be/dQw4w9WgXcQ', status: 'error' }),
+      source('good', { url: 'https://youtube.com/watch?v=dQw4w9WgXcQ', status: 'ready' }),
     ]
     const groups = findDuplicateGroups(sources)
-    expect(groups.map((g) => g.key)).toEqual(['url:a.com/', 'url:b.com/'])
-    expect(duplicateRemovalIds(groups)).toEqual(['a2', 'b2', 'b3'])
+    expect(groups[0]?.keep.id).toBe('good')
+    expect(duplicateRemovalIds(groups)).toEqual(['bad'])
   })
 })

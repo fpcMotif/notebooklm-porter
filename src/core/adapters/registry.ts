@@ -1,4 +1,4 @@
-import type { SourceAdapter } from './types'
+import type { Capturable, SourceAdapter } from './types'
 import { youtubeAdapter } from './youtube/adapter'
 import { xAdapter } from './x/adapter'
 import { redditAdapter } from './reddit/adapter'
@@ -18,15 +18,30 @@ export const ALL_ADAPTERS: readonly SourceAdapter[] = [
 ]
 
 export function adapterForUrl(url: string): SourceAdapter | undefined {
-  let hostname: string
+  let parsed: URL
   try {
-    hostname = new URL(url).hostname
+    parsed = new URL(url)
   } catch {
     return undefined
   }
   return ALL_ADAPTERS.find((a) =>
-    a.hostMatch.some((pattern) => hostMatchesHostname(pattern, hostname)),
+    a.hostMatch.some((pattern) => hostPatternMatchesUrl(pattern, parsed)),
   )
+}
+
+/** A URL whose registered adapter has confirmed a concrete capture offer. */
+export interface ResolvedCapturable {
+  url: string
+  adapter: SourceAdapter
+  capturable: Capturable
+}
+
+/** Resolves host ownership and URL eligibility together, once. */
+export function resolveCapturable(url: string): ResolvedCapturable | undefined {
+  const adapter = adapterForUrl(url)
+  if (adapter === undefined) return undefined
+  const capturable = adapter.detect(url)
+  return capturable === null ? undefined : { url, adapter, capturable }
 }
 
 /**
@@ -42,12 +57,14 @@ export function allHostPermissions(): string[] {
   return [...hosts]
 }
 
-/** Whether a `https://host/*` pattern's host segment covers `hostname` (exact or `*.` wildcard). */
-function hostMatchesHostname(pattern: string, hostname: string): boolean {
-  const host = pattern.split('://')[1]?.split('/')[0] ?? pattern
+/** Whether one origin match pattern covers a URL (exact host or `*.` wildcard). */
+function hostPatternMatchesUrl(pattern: string, url: URL): boolean {
+  const [scheme, remainder] = pattern.split('://')
+  if (scheme === undefined || remainder === undefined || url.protocol !== `${scheme}:`) return false
+  const host = remainder.split('/')[0] ?? remainder
   if (host.startsWith('*.')) {
     const base = host.slice(2)
-    return hostname === base || hostname.endsWith(`.${base}`)
+    return url.hostname === base || url.hostname.endsWith(`.${base}`)
   }
-  return hostname === host
+  return url.hostname === host
 }

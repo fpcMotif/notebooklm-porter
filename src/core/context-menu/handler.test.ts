@@ -85,6 +85,18 @@ describe('captureContextMenuClick', () => {
     }),
   )
 
+  it.effect('falls back to generic capture for an invalid supported-host link', () =>
+    Effect.gen(function* () {
+      const doc = yield* captureContextMenuClick({
+        menuId: CONTEXT_MENU_IDS.link,
+        linkUrl: 'https://www.reddit.com/r/test/',
+      }).pipe(Effect.provide(layer()))
+
+      assert.strictEqual(doc?.kind, 'web')
+      assert.strictEqual(doc?.site, 'web')
+    }),
+  )
+
   it.effect('uses a background URL adapter for a supported linked discussion', () =>
     Effect.gen(function* () {
       const doc = yield* captureContextMenuClick({

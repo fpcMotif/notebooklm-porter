@@ -1,15 +1,18 @@
 import { Context, Effect } from 'effect'
 import type { NblmAccount } from './accounts/parse'
+import type { NotebookLmAccountBinding, NotebookTarget } from './accounts/ownership'
 import type { CaptureOptions } from './adapters/types'
 import type { BackupOutcome } from './backup/client'
 import type { DebugEntry } from './debug'
 import { IpcError } from './fx/errors'
 import type { DomDeliveryRequest } from './ingest/dom/contracts'
 import type { ConsoleScan } from './ingest/sources/console'
+import { decodeCapture } from './model/codec'
 import type { Capture, SourceDoc } from './model/types'
 import type { QueueSnapshot } from './queue/queue'
-import type { PorterSettings } from './settings'
+import { decodeSettingsPatch, type PorterSettings, type SettingsPatch } from './settings'
 import type { WatchView } from './watch/watch'
+import type { NotebookMeta } from './notebooks/model'
 
 /**
  * Every runtime message in the extension, discriminated on `type`.
@@ -32,42 +35,39 @@ export type PorterMessage =
   /** Popup requests export of stored docs as downloaded files. */
   | { type: 'porter/export'; docIds: string[]; format: 'markdown' | 'jsonl' }
   /** Popup queues stored docs for durable background ingest into a notebook. */
-  | { type: 'porter/queue-enqueue'; docIds: string[]; notebookId: string }
+  | { type: 'porter/queue-enqueue'; docIds: string[]; target: NotebookTarget }
   /** Popup reads durable ingest progress. */
   | { type: 'porter/queue-status' }
   /** Popup explicitly retries failed or uncertain queue jobs. */
   | { type: 'porter/queue-retry'; jobIds: string[] }
   /** Popup enables scheduled resync for one captured, background-capturable source. */
-  | { type: 'porter/watch-create'; docId: string; notebookId: string }
+  | { type: 'porter/watch-create'; docId: string; target: NotebookTarget }
   /** Popup reads durable automatic-resync bindings. */
   | { type: 'porter/watch-list' }
   /** Popup removes one automatic-resync binding. */
   | { type: 'porter/watch-remove'; watchId: string }
-  /** Popup asks the background to list notebooks in the active NBLM account. */
-  | { type: 'porter/list-notebooks'; forceRefresh?: true }
-  /** Popup asks the background to create a notebook, then re-list. */
-  | { type: 'porter/create-notebook'; title: string }
+  /** Popup asks the background to list notebooks for an immutable account binding. */
+  | { type: 'porter/list-notebooks'; account: NotebookLmAccountBinding; forceRefresh?: true }
+  /** Popup asks the background to create a notebook for an immutable account binding, then re-list. */
+  | { type: 'porter/create-notebook'; account: NotebookLmAccountBinding; title: string }
   /** Console: read a notebook's sources and analyze duplicates + failed loads. */
-  | { type: 'porter/nblm-scan-console'; notebookId: string }
+  | { type: 'porter/nblm-scan-console'; target: NotebookTarget }
   /** Console: auto-remove duplicate sources in a notebook, then re-scan. */
-  | { type: 'porter/nblm-dedupe'; notebookId: string }
+  | { type: 'porter/nblm-dedupe'; target: NotebookTarget }
   /** Console: retry one failed source (re-fetch in place), then re-scan. */
-  | { type: 'porter/nblm-retry-source'; notebookId: string; sourceId: string }
+  | { type: 'porter/nblm-retry-source'; target: NotebookTarget; sourceId: string }
   /** Popup asks the background to re-scan signed-in NotebookLM accounts. */
   | { type: 'porter/accounts-refresh' }
   /** Popup reads persisted settings. */
   | { type: 'porter/get-settings' }
   /** Popup persists a settings patch. */
-  | { type: 'porter/update-settings'; patch: Partial<PorterSettings> }
+  | { type: 'porter/update-settings'; patch: SettingsPatch }
   /** Popup requests backup of stored docs into the user's Google Drive. */
   | { type: 'porter/backup-drive'; docIds: string[] }
   /** Popup reads the persisted SW debug ring (SW console isn't reachable from the popup). */
   | { type: 'porter/debug-log' }
   /** Popup clears the persisted SW debug ring. */
   | { type: 'porter/debug-clear' }
-
-/** One row of the notebook picker — a NotebookLM notebook's id + title. */
-export type NotebookMeta = { id: string; title: string }
 
 /** Per-message success payloads — the single source of truth for both sides of the wire. */
 export interface PorterResponseMap {
@@ -118,26 +118,181 @@ export function hasMessageType<T extends string>(value: unknown, type: T): boole
   )
 }
 
-export function isExtractResponse(value: unknown): value is ExtractResponse {
-  if (typeof value !== 'object' || value === null || !('ok' in value)) return false
-  const ok = (value as { ok: unknown }).ok
-  if (typeof ok !== 'boolean') return false
-  if (ok) {
-    const capture = (value as { capture?: unknown }).capture
-    return typeof capture === 'object' && capture !== null
-  }
-  const error = (value as { error?: unknown }).error
-  return typeof error === 'string'
+type UnknownRecord = Record<string, unknown>
+
+function isRecord(value: unknown): value is UnknownRecord {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
 }
 
-export function isPorterMessage(value: unknown): value is PorterMessage {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    'type' in value &&
-    typeof (value as { type: unknown }).type === 'string' &&
-    (value as { type: string }).type.startsWith('porter/')
+function decodeNonnegativeSafeInteger(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined
+}
+
+function decodeStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || !value.every((item) => typeof item === 'string')) return undefined
+  return [...value]
+}
+
+function hasOnlyKeys(value: UnknownRecord, keys: readonly string[]): boolean {
+  return Reflect.ownKeys(value).every((key) => typeof key === 'string' && keys.includes(key))
+}
+
+function decodeAccountBinding(value: unknown): NotebookLmAccountBinding | undefined {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['authuser', 'accountEmail'])) return undefined
+  const authuser = decodeNonnegativeSafeInteger(value.authuser)
+  if (
+    authuser === undefined ||
+    typeof value.accountEmail !== 'string' ||
+    !value.accountEmail.trim()
   )
+    return undefined
+  return { authuser, accountEmail: value.accountEmail }
+}
+
+function decodeNotebookTarget(value: unknown): NotebookTarget | undefined {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['authuser', 'accountEmail', 'notebookId']))
+    return undefined
+  const authuser = decodeNonnegativeSafeInteger(value.authuser)
+  if (
+    authuser === undefined ||
+    typeof value.accountEmail !== 'string' ||
+    !value.accountEmail.trim() ||
+    typeof value.notebookId !== 'string' ||
+    !value.notebookId.trim()
+  )
+    return undefined
+  return { authuser, accountEmail: value.accountEmail, notebookId: value.notebookId }
+}
+
+function decodeCaptureOptions(value: unknown): CaptureOptions | undefined {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['enrichTranscripts'])) return undefined
+  if (Object.hasOwn(value, 'enrichTranscripts') && value.enrichTranscripts !== true)
+    return undefined
+  return Object.hasOwn(value, 'enrichTranscripts') ? { enrichTranscripts: true } : {}
+}
+
+function decodeOptionalCaptureOptions(value: UnknownRecord): CaptureOptions | undefined | null {
+  if (!Object.hasOwn(value, 'options')) return undefined
+  return decodeCaptureOptions(value.options) ?? null
+}
+
+function decodeOptionalForceRefresh(value: UnknownRecord): true | undefined | null {
+  if (!Object.hasOwn(value, 'forceRefresh')) return undefined
+  return value.forceRefresh === true ? true : null
+}
+
+/** Decodes a content-script extract reply into a canonical value. */
+export function decodeExtractResponse(value: unknown): ExtractResponse | undefined {
+  if (!isRecord(value)) return undefined
+  if (value.ok === true) {
+    const capture = decodeCapture(value.capture)
+    return capture === undefined ? undefined : { ok: true, capture }
+  }
+  return value.ok === false && typeof value.error === 'string'
+    ? { ok: false, error: value.error }
+    : undefined
+}
+
+/** Decodes a runtime message into a canonical, known protocol value. */
+export function decodePorterMessage(value: unknown): PorterMessage | undefined {
+  if (!isRecord(value) || typeof value.type !== 'string') return undefined
+
+  switch (value.type) {
+    case 'porter/detect':
+      return typeof value.url === 'string' ? { type: value.type, url: value.url } : undefined
+    case 'porter/capture-url': {
+      const tabId = decodeNonnegativeSafeInteger(value.tabId)
+      const options = decodeOptionalCaptureOptions(value)
+      return typeof value.url === 'string' && tabId !== undefined && options !== null
+        ? { type: value.type, url: value.url, tabId, ...(options !== undefined ? { options } : {}) }
+        : undefined
+    }
+    case 'porter/capture-page': {
+      const tabId = decodeNonnegativeSafeInteger(value.tabId)
+      return tabId === undefined ? undefined : { type: value.type, tabId }
+    }
+    case 'porter/capture-result': {
+      const capture = decodeCapture(value.capture)
+      return capture === undefined ? undefined : { type: value.type, capture }
+    }
+    case 'porter/list-docs':
+    case 'porter/queue-status':
+    case 'porter/watch-list':
+    case 'porter/accounts-refresh':
+    case 'porter/get-settings':
+    case 'porter/debug-log':
+    case 'porter/debug-clear':
+      return { type: value.type }
+    case 'porter/delete-doc':
+      return typeof value.docId === 'string' ? { type: value.type, docId: value.docId } : undefined
+    case 'porter/watch-remove':
+      return typeof value.watchId === 'string'
+        ? { type: value.type, watchId: value.watchId }
+        : undefined
+    case 'porter/export': {
+      const docIds = decodeStringArray(value.docIds)
+      return docIds !== undefined && (value.format === 'markdown' || value.format === 'jsonl')
+        ? { type: value.type, docIds, format: value.format }
+        : undefined
+    }
+    case 'porter/queue-enqueue': {
+      const docIds = decodeStringArray(value.docIds)
+      const target = decodeNotebookTarget(value.target)
+      return docIds !== undefined && target !== undefined
+        ? { type: value.type, docIds, target }
+        : undefined
+    }
+    case 'porter/queue-retry': {
+      const jobIds = decodeStringArray(value.jobIds)
+      return jobIds === undefined ? undefined : { type: value.type, jobIds }
+    }
+    case 'porter/watch-create': {
+      const target = decodeNotebookTarget(value.target)
+      return typeof value.docId === 'string' && target !== undefined
+        ? { type: value.type, docId: value.docId, target }
+        : undefined
+    }
+    case 'porter/list-notebooks': {
+      const account = decodeAccountBinding(value.account)
+      const forceRefresh = decodeOptionalForceRefresh(value)
+      return account !== undefined && forceRefresh !== null
+        ? {
+            type: value.type,
+            account,
+            ...(forceRefresh !== undefined ? { forceRefresh } : {}),
+          }
+        : undefined
+    }
+    case 'porter/create-notebook': {
+      const account = decodeAccountBinding(value.account)
+      return account !== undefined && typeof value.title === 'string'
+        ? { type: value.type, account, title: value.title }
+        : undefined
+    }
+    case 'porter/nblm-scan-console':
+    case 'porter/nblm-dedupe': {
+      const target = decodeNotebookTarget(value.target)
+      return target === undefined ? undefined : { type: value.type, target }
+    }
+    case 'porter/nblm-retry-source': {
+      const target = decodeNotebookTarget(value.target)
+      return target !== undefined && typeof value.sourceId === 'string'
+        ? { type: value.type, target, sourceId: value.sourceId }
+        : undefined
+    }
+    case 'porter/update-settings': {
+      const patch = decodeSettingsPatch(value.patch)
+      return patch === undefined ? undefined : { type: value.type, patch }
+    }
+    case 'porter/backup-drive': {
+      const docIds = decodeStringArray(value.docIds)
+      return docIds === undefined ? undefined : { type: value.type, docIds }
+    }
+    default:
+      return undefined
+  }
 }
 
 export interface PorterClientShape {

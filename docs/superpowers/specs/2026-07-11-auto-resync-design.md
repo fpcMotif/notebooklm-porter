@@ -32,8 +32,8 @@ perform an initial import.
 
 1. A single named alarm wakes the background service worker at the earliest
    due watch.
-2. The worker picks one due watch, verifies its adapter has a background
-   `captureFromUrl`, and recaptures from the stored canonical URL.
+2. The worker picks one due watch, resolves an adapter with the `url` strategy,
+   and recaptures from the stored canonical URL.
 3. It formats and persists the new document snapshot, plans immutable ingest
    units, and enqueues them against the stored account/email/notebook target.
    A newer scheduled snapshot supersedes an older queued, retrying, or blocked
@@ -54,7 +54,10 @@ perform an initial import.
 - `core/watch/resync.ts` composes capture, formatting, queue enqueueing, and
   alarm scheduling.
 - Router messages create/list/remove watches; the popup only renders their
-  status and sends explicit user actions.
+  status and sends explicit user actions. Each view carries a detached full
+  target. Popup matching uses all target fields, never just `notebookId`.
+  It uses the current catalog title only when the watch belongs to the current
+  account; other-account watches show their raw notebook id.
 - Background serializes watch and queue operations through the same executor,
   preventing concurrent read-modify-write of queue state.
 

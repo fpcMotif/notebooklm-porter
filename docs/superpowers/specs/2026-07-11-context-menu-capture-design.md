@@ -18,10 +18,10 @@ The background entrypoint registers three menus: Capture selection, Capture
 page, and Capture link. A click is translated into a small core input and
 handled by `core/context-menu/`.
 
-For a link, the handler first uses an existing background URL adapter when it
-has `captureFromUrl`. Content-script-only adapters (currently X) deliberately
-fall back to generic web capture: the clicked tab is not the linked page, so
-it cannot truthfully run that page's content-script extraction.
+For a link, the handler first resolves an existing adapter whose strategy is
+`url`. Content-script adapters (currently X) deliberately fall back to generic
+web capture: the clicked tab is not the linked page, so it cannot truthfully
+run that page's content-script extraction.
 
 For a selection, the handler uses the page URL/title and selected text. Link
 click data in Chrome provides its URL but not its anchor text, so the generic
@@ -40,16 +40,17 @@ frontmatter.
 
 Stable source ids distinguish capture modes:
 
-- page: `web:page:<hash(url)>`
-- link: `web:link:<hash(url)>`
-- selection: `web:selection:<hash(url + normalized text)>`
+- page: `web:page:<sha256-base64url(url)>`
+- link: `web:link:<sha256-base64url(url)>`
+- selection: `web:selection:<sha256-base64url(url + normalized text)>`
 
 Thus repeated page/link captures replace their own prior snapshots while
 different selections remain separately capturable.
 
 ## Boundaries and failure behavior
 
-- `core/context-menu/capture.ts` is pure normalization and validation.
+- `core/context-menu/capture.ts` normalizes and validates input, then derives
+  a full SHA-256 id with the browser Web Crypto API.
 - `core/context-menu/handler.ts` composes adapter capture, scripting,
   formatting, and local storage.
 - `fx/Scripting` is the only boundary that touches `browser.scripting`.

@@ -18,6 +18,7 @@ function finiteNumber(value: unknown): number | undefined {
 }
 
 function canonicalVideoIdentity(parsed: URL): { videoId: string; url: string } | undefined {
+  if (parsed.protocol !== 'https:') return undefined
   const host = parsed.hostname.toLowerCase()
   const videoId =
     host === 'youtu.be'

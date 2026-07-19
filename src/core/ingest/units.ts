@@ -1,8 +1,6 @@
 import { CAPTURED_AT_KEY, splitFrontmatter } from '../format/frontmatter'
-import type { SourceDoc, TranscriptDocument } from '../model/types'
+import type { PlaylistSourceDoc, SourceDoc, TranscriptDocument } from '../model/types'
 import { contentHash } from '../store/ledger'
-
-const YOUTUBE_WATCH_URL_RE = /https:\/\/www\.youtube\.com\/watch\?v=([\w-]{11})/g
 
 export type IngestUnit =
   | {
@@ -21,52 +19,38 @@ export type IngestUnit =
       url: string
     }
 
-function videoUrlsFromJsonl(jsonl: string): string[] {
-  const urls: string[] = []
-  for (const line of jsonl.split('\n')) {
-    if (line.trim().length === 0) continue
-    try {
-      const parsed = JSON.parse(line) as { url?: unknown }
-      if (typeof parsed.url === 'string') urls.push(parsed.url)
-    } catch {
-      // A malformed row is ignored. The Markdown fallback below is only used
-      // when no valid structured video URL was recovered at all.
-    }
-  }
-  return urls
-}
+type CanonicalYoutubeVideo = Readonly<{ videoId: string; url: string }>
 
-function canonicalYoutubeUrls(urls: string[]): string[] {
+function canonicalYoutubeVideos(videoIds: readonly string[]): CanonicalYoutubeVideo[] {
   const seen = new Set<string>()
-  const canonical: string[] = []
+  const canonical: CanonicalYoutubeVideo[] = []
 
-  for (const url of urls) {
-    const match = YOUTUBE_WATCH_URL_RE.exec(url)
-    YOUTUBE_WATCH_URL_RE.lastIndex = 0
-    const videoId = match?.[1]
-    if (videoId === undefined || seen.has(videoId)) continue
+  for (const videoId of videoIds) {
+    if (videoId.trim() === '' || seen.has(videoId)) continue
     seen.add(videoId)
-    canonical.push(`https://www.youtube.com/watch?v=${videoId}`)
+    canonical.push({ videoId, url: canonicalYoutubeWatchUrl(videoId) })
   }
 
   return canonical
 }
 
-function videoUrlsForDoc(doc: SourceDoc): string[] {
-  const jsonlUrls = doc.jsonl === undefined ? [] : videoUrlsFromJsonl(doc.jsonl)
-  const structured = canonicalYoutubeUrls(jsonlUrls)
-  if (structured.length > 0) return structured
-
-  const urls = doc.markdown.match(YOUTUBE_WATCH_URL_RE) ?? []
-  YOUTUBE_WATCH_URL_RE.lastIndex = 0
-  return canonicalYoutubeUrls(urls)
+/** Treats a captured video id as opaque data, never as query syntax. */
+export function canonicalYoutubeWatchUrl(videoId: string): string {
+  const url = new URL('https://www.youtube.com/watch')
+  url.searchParams.set('v', videoId)
+  return url.toString()
 }
 
-function videoIdFromUrl(url: string): string {
-  const match = YOUTUBE_WATCH_URL_RE.exec(url)
-  YOUTUBE_WATCH_URL_RE.lastIndex = 0
-  if (match?.[1] === undefined) throw new Error(`Expected canonical YouTube URL: ${url}`)
-  return match[1]
+function videoIdFromCanonicalYoutubeUrl(url: string): string | undefined {
+  try {
+    const parsed = new URL(url)
+    const videoId = parsed.searchParams.get('v')
+    if (!videoId || videoId.trim() === '' || canonicalYoutubeWatchUrl(videoId) !== url)
+      return undefined
+    return videoId
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -91,7 +75,7 @@ export function contentHashForIngest(markdown: string): string {
   return contentHash(`${stableFrontmatter.join('\n')}\n---${split.body}`)
 }
 
-function transcriptDocsByVideoId(doc: SourceDoc): Map<string, TranscriptDocument> {
+function transcriptDocsByVideoId(doc: PlaylistSourceDoc): Map<string, TranscriptDocument> {
   const transcripts = new Map<string, TranscriptDocument>()
   for (const transcript of doc.videoDocs ?? []) {
     // First snapshot wins; a capture only produces one snapshot per video.
@@ -107,8 +91,9 @@ function transcriptDocsByVideoId(doc: SourceDoc): Map<string, TranscriptDocument
  */
 export function planIngestUnits(doc: SourceDoc): IngestUnit[] {
   if (doc.kind === 'video') {
-    const videoId = videoIdFromUrl(doc.canonicalUrl)
-    const url = `https://www.youtube.com/watch?v=${videoId}`
+    const videoId = videoIdFromCanonicalYoutubeUrl(doc.canonicalUrl)
+    if (videoId === undefined) return []
+    const url = canonicalYoutubeWatchUrl(videoId)
     return [
       {
         kind: 'youtube',
@@ -143,28 +128,29 @@ export function planIngestUnits(doc: SourceDoc): IngestUnit[] {
   }
 
   const transcripts = transcriptDocsByVideoId(doc)
-  const videos = videoUrlsForDoc(doc).map((url) => {
-    const videoId = videoIdFromUrl(url)
-    const transcript = transcripts.get(videoId)
-    if (transcript !== undefined) {
+  const videos = canonicalYoutubeVideos(doc.playlistVideos.map((video) => video.videoId)).map(
+    ({ videoId, url }) => {
+      const transcript = transcripts.get(videoId)
+      if (transcript !== undefined) {
+        return {
+          kind: 'text' as const,
+          docId: doc.id,
+          id: `youtube:${videoId}`,
+          contentHash: youtubeReceiptHash(url),
+          title: transcript.title,
+          markdown: transcript.markdown,
+        }
+      }
+
       return {
-        kind: 'text' as const,
+        kind: 'youtube' as const,
         docId: doc.id,
         id: `youtube:${videoId}`,
         contentHash: youtubeReceiptHash(url),
-        title: transcript.title,
-        markdown: transcript.markdown,
+        url,
       }
-    }
-
-    return {
-      kind: 'youtube' as const,
-      docId: doc.id,
-      id: `youtube:${videoId}`,
-      contentHash: youtubeReceiptHash(url),
-      url,
-    }
-  })
+    },
+  )
 
   return [overview, ...videos]
 }

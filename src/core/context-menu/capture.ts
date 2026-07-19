@@ -1,5 +1,6 @@
 /** Pure normalization for page, selection, and link context-menu captures. */
 
+import { sha256Base64Url } from '../crypto'
 import type { WebCapture as DomainWebCapture } from '../model/types'
 
 /** Page text is bounded before it becomes a persisted extension document. */
@@ -69,29 +70,24 @@ function pageText(value: string): string {
     : value
 }
 
-function hash(value: string): string {
-  let result = 0x811c9dc5
-  for (const character of value) {
-    result ^= character.codePointAt(0) ?? 0
-    result = Math.imul(result, 0x01000193)
-  }
-  return (result >>> 0).toString(16).padStart(8, '0')
-}
-
 /**
  * Stable ids replace repeated page/link snapshots, while distinct selections
  * from the same page remain independently capturable.
  */
-export function webCaptureId(mode: WebCaptureMode, url: string, text: string): string {
+export async function webCaptureId(
+  mode: WebCaptureMode,
+  url: string,
+  text: string,
+): Promise<string> {
   const fingerprint = mode === 'selection' ? `${url}\n${text}` : url
-  return `${mode}:${hash(fingerprint)}`
+  return `${mode}:${await sha256Base64Url(fingerprint)}`
 }
 
 /**
  * Validates and normalizes a browser context-menu payload. Undefined means
  * that it is not safe or useful to persist as a generic web source.
  */
-export function createWebCapture(input: WebCaptureInput): WebCapture | undefined {
+export async function createWebCapture(input: WebCaptureInput): Promise<WebCapture | undefined> {
   const url = normalizeHttpUrl(input.url)
   if (!url) return undefined
 
@@ -100,7 +96,7 @@ export function createWebCapture(input: WebCaptureInput): WebCapture | undefined
   if (!text) return undefined
 
   return {
-    id: webCaptureId(input.mode, url, text),
+    id: await webCaptureId(input.mode, url, text),
     url,
     title: normalizeWebTitle(input.title, new URL(url).hostname),
     mode: input.mode,
