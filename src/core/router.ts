@@ -4,7 +4,7 @@
  * exercisable through the real extension. `background.ts` is now just the
  * `runtime.onMessage` listener glue over `handlePorterMessage`.
  */
-import { Effect } from 'effect'
+import { Effect, Result } from 'effect'
 import { discoverAccounts } from './accounts/discover'
 import { captureSource, captureViaContentScript } from './adapters/capture'
 import { adapterForUrl } from './adapters/registry'
@@ -25,6 +25,7 @@ import {
 import { RPC_IDS } from './ingest/rpc/protocol'
 import { scanSources } from './ingest/sources/console'
 import { duplicateRemovalIds, findDuplicateGroups } from './ingest/sources/dedup'
+import { reconcileUnits } from './ingest/sources/reconcile'
 import { planIngestUnits } from './ingest/units'
 import { type NotebookMeta, type PorterMessage, type PorterReply } from './messaging'
 import type { Capture } from './model/types'
@@ -32,7 +33,7 @@ import { getSettings, notebookTargetPatch, updateSettings, type PorterSettings }
 import { QUEUE_ALARM, enqueueUnits, queueSnapshot, retryJob, type QueueTarget } from './queue/queue'
 import { loadQueue, saveQueue } from './queue/store'
 import { deleteDoc, listDocs, storeCapturedDoc } from './store'
-import { loadLedger, partitionSynced } from './store/ledger'
+import { loadLedger, partitionSynced, recordSynced, saveLedger } from './store/ledger'
 import {
   cacheNotebooks,
   loadNotebookCache,
@@ -173,7 +174,8 @@ function cacheFreshNotebooks(session: NblmSession, authuser: number, notebooks: 
 function verifyTargetNotebook(
   notebookId: string,
 ): Effect.Effect<
-  { settings: PorterSettings; target: QueueTarget } | { ok: false; error: string },
+  | { settings: PorterSettings; target: QueueTarget; session: NblmSession }
+  | { ok: false; error: string },
   PorterError,
   Http | Kv | DebugLog
 > {
@@ -195,6 +197,7 @@ function verifyTargetNotebook(
     }
     return {
       settings,
+      session,
       target: {
         notebookId,
         authuser: settings.nblmAuthuser,
@@ -276,7 +279,7 @@ const handlers: Handlers = {
     Effect.gen(function* () {
       const verified = yield* verifyTargetNotebook(msg.notebookId)
       if ('ok' in verified) return verified
-      const { settings, target } = verified
+      const { settings, target, session } = verified
       const docs = yield* listDocs()
       const requested = new Set(msg.docIds)
       const selectedDocs = docs.filter((doc) => requested.has(doc.id))
@@ -284,21 +287,53 @@ const handlers: Handlers = {
       // Skip units already receipted for this notebook so a re-ingest can't
       // create a second copy of an unchanged source. The logged breakdown also
       // exposes whether the ledger actually remembers a prior run.
-      const ledger = yield* loadLedger()
+      let ledger = yield* loadLedger()
       const {
-        pending: pendingUnits,
+        pending: ledgerPending,
         synced,
         changed,
       } = partitionSynced(ledger, msg.notebookId, units)
+      // Advisory only: drain enforces. A listing failure falls back to ledger-only.
+      let pendingUnits = ledgerPending
+      let alreadyOnServer = 0
+      const debugLog = yield* DebugLog
+      const sourcesResult = yield* Effect.result(
+        listSources(msg.notebookId, session, settings.nblmAuthuser, { retry: false }),
+      )
+      if (Result.isFailure(sourcesResult)) {
+        yield* debugLog.log(
+          'queue',
+          'enqueue advisory source listing failed',
+          { error: String(sourcesResult.failure) },
+          { level: 'warn' },
+        )
+      } else {
+        const { present, absent } = reconcileUnits(ledgerPending, sourcesResult.success)
+        if (present.length > 0) {
+          const now = new Date().toISOString()
+          ledger = recordSynced(
+            ledger,
+            msg.notebookId,
+            present.map(({ unit }) => ({
+              id: unit.id,
+              contentHash: unit.contentHash,
+              now,
+            })),
+          )
+          yield* saveLedger(ledger)
+          alreadyOnServer = present.length
+          pendingUnits = absent
+        }
+      }
       const queue = yield* loadQueue()
       const next = enqueueUnits(queue, target, pendingUnits, new Date().toISOString())
       yield* saveQueue(next)
-      const debugLog = yield* DebugLog
       yield* debugLog.log('queue', 'enqueue', {
         notebookId: msg.notebookId,
         requestedDocs: selectedDocs.length,
         plannedUnits: units.length,
         alreadySynced: synced.length,
+        alreadyOnServer,
         changed,
         enqueued: pendingUnits.length,
         pending: next.jobs.length,
