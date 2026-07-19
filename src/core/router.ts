@@ -29,6 +29,7 @@ import {
   readNotebookCatalog,
   refreshNotebookCatalog,
 } from './notebooks/catalog'
+import { recordRoute, stickyRouteKey } from './routing/sticky'
 import { getSettings, notebookTargetPatch, updateSettings } from './settings'
 import { QUEUE_ALARM, enqueueUnits, queueSnapshot, retryJob } from './queue/queue'
 import { loadQueue, saveQueue } from './queue/store'
@@ -208,12 +209,30 @@ const handlers: Handlers = {
         const settings = yield* getSettings()
         const currentBinding = accountBindingFor(settings)
         if (currentBinding !== undefined && sameAccountBinding(currentBinding, target)) {
+          // Sticky routing (§routing/sticky): remember the notebook + account
+          // each captured site/domain delivered to, keyed by site (or hostname
+          // for `web`), so the popup can preselect it next time. Recorded under
+          // the same binding guard as `notebookTargets` — a delivery made while
+          // the mutable selection points elsewhere never rewrites the memory.
+          const now = new Date().toISOString()
+          let stickyRoutes = settings.stickyRoutes
+          const routeKeys = new Set(
+            selectedDocs.map((doc) => stickyRouteKey(doc.site, doc.canonicalUrl)),
+          )
+          for (const routeKey of routeKeys) {
+            stickyRoutes = recordRoute(stickyRoutes, routeKey, {
+              notebookId: target.notebookId,
+              authuser: target.authuser,
+              updatedAt: now,
+            })
+          }
           yield* updateSettings({
             notebookTargets: notebookTargetPatch(
               settings.notebookTargets,
               sites,
               target.notebookId,
             ),
+            stickyRoutes,
           })
         }
       }

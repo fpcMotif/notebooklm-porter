@@ -39,6 +39,8 @@ export function App() {
     driveError,
     pending: notebookPending,
     sourceConsole,
+    stickyPreselected,
+    pendingAccountSwitch,
   } = workspaceState
   const accountBusy =
     notebookPending.bootstrap || notebookPending.discover || notebookPending.switchAccount
@@ -56,6 +58,15 @@ export function App() {
   useEffect(() => {
     if (!canEnrichTranscripts) setEnrichTranscripts(false)
   }, [canEnrichTranscripts])
+
+  // Sticky routing (§routing/sticky): when the staged docs' remembered target
+  // lives on a different, still-known account, switch to it so its notebook can
+  // be preselected. The controller only raises this while the user hasn't taken
+  // manual control and no account operation is in flight, so it self-clears.
+  useEffect(() => {
+    if (pendingAccountSwitch === undefined) return
+    void popupRuntime.runPromise(notebookWorkspace.switchAccount(pendingAccountSwitch))
+  }, [pendingAccountSwitch, notebookWorkspace])
 
   const captureAction = useAction<[]>(() =>
     Effect.gen(function* () {
@@ -175,7 +186,10 @@ export function App() {
         settings={settings}
         controlsDisabled={controlsDisabled}
         discoverBusy={notebookPending.discover}
-        onSelectAccount={(authuser) => void selectAccount(authuser)}
+        onSelectAccount={(authuser) => {
+          notebookWorkspace.markManualTarget()
+          void selectAccount(authuser)
+        }}
         onFindAccounts={() => void popupRuntime.runPromise(notebookWorkspace.discoverAccounts())}
       />
       {notebooksError && <p class="mb-3 text-xs text-red-600">{notebooksError}</p>}
@@ -206,6 +220,7 @@ export function App() {
           hasAccounts={settings.accounts.length > 0}
           notebooks={notebooks}
           selectedNotebookId={selectedNotebookId}
+          stickyPreselected={stickyPreselected}
           hasSelectedTarget={selectedNotebookTarget !== undefined}
           onSelectNotebook={(id) => notebookWorkspace.selectNotebook(id)}
           controlsDisabled={controlsDisabled}

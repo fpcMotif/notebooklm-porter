@@ -10,6 +10,8 @@ interface NotebookPickerProps {
   hasAccounts: boolean
   notebooks: readonly NotebookMeta[]
   selectedNotebookId: string
+  /** The selection is a remembered sticky route the user hasn't overridden — shows the "remembered" hint. */
+  stickyPreselected: boolean
   hasSelectedTarget: boolean
   onSelectNotebook: (id: string) => void
   controlsDisabled: boolean
@@ -35,6 +37,7 @@ export function NotebookPicker({
   hasAccounts,
   notebooks,
   selectedNotebookId,
+  stickyPreselected,
   hasSelectedTarget,
   onSelectNotebook,
   controlsDisabled,
@@ -82,6 +85,11 @@ export function NotebookPicker({
             {refreshBusy ? 'Loading…' : '↻'}
           </button>
         </div>
+      )}
+      {hasAccounts && stickyPreselected && (
+        <p class="mt-1 text-xs text-gray-400">
+          Remembered from last time — pick another to change it.
+        </p>
       )}
       {hasAccounts && (
         <div class="mt-2 flex items-center gap-2">

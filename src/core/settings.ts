@@ -4,6 +4,7 @@ import type { StorageError } from './fx/errors'
 import { kvSlot } from './fx/kv-slot'
 import { Kv } from './fx/services'
 import { isSiteId, type SiteId } from './model/types'
+import { emptyStickyRoutes, type StickyRouteMap, type StickyTarget } from './routing/sticky'
 
 const KEY = 'porter/settings'
 
@@ -19,6 +20,13 @@ export interface PorterSettings {
   accounts: NblmAccount[]
   /** Remembered destination IDs. The popup validates each against the active account's fresh list. */
   notebookTargets: NotebookTargets
+  /**
+   * Sticky routing (design: remember the last notebook + account a site or
+   * web domain successfully delivered to). Superset of `notebookTargets` —
+   * carries the account and a timestamp, and keys `web` captures by
+   * hostname — see `src/core/routing/sticky.ts`.
+   */
+  stickyRoutes: StickyRouteMap
   /** Google OAuth Client ID (Chrome Extension type) for Drive backup. */
   driveClientId?: string
 }
@@ -29,6 +37,7 @@ export const DEFAULT_SETTINGS: PorterSettings = {
   nblmAuthuser: 0,
   accounts: [],
   notebookTargets: {},
+  stickyRoutes: emptyStickyRoutes(),
 }
 
 const SETTING_KEYS = new Set<keyof PorterSettings>([
@@ -100,8 +109,33 @@ function decodeNotebookTargets(value: unknown, strict: boolean): NotebookTargets
   return targets
 }
 
+function decodeStickyTarget(value: unknown): StickyTarget | undefined {
+  if (!isRecord(value)) return undefined
+  const authuser = decodeAuthuser(value.authuser)
+  if (
+    authuser === undefined ||
+    typeof value.notebookId !== 'string' ||
+    !value.notebookId.trim() ||
+    typeof value.updatedAt !== 'string' ||
+    !value.updatedAt.trim()
+  )
+    return undefined
+  return { notebookId: value.notebookId, authuser, updatedAt: value.updatedAt }
+}
+
+function decodeStickyRoutes(value: unknown): StickyRouteMap {
+  if (!isRecord(value)) return emptyStickyRoutes()
+  const routes: StickyRouteMap = {}
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== 'string') continue
+    const target = decodeStickyTarget(value[key])
+    if (target !== undefined) routes[key] = target
+  }
+  return routes
+}
+
 function emptySettings(): PorterSettings {
-  return { nblmAuthuser: 0, accounts: [], notebookTargets: {} }
+  return { nblmAuthuser: 0, accounts: [], notebookTargets: {}, stickyRoutes: emptyStickyRoutes() }
 }
 
 /** Strictly validates a popup-originated partial settings update. */
@@ -150,10 +184,14 @@ export function decodeStoredSettings(value: unknown): PorterSettings {
       Object.hasOwn(value, 'notebookTargets') ? value.notebookTargets : undefined,
       false,
     ) ?? {}
+  const stickyRoutes = decodeStickyRoutes(
+    Object.hasOwn(value, 'stickyRoutes') ? value.stickyRoutes : undefined,
+  )
   return {
     nblmAuthuser,
     accounts,
     notebookTargets,
+    stickyRoutes,
     ...(Object.hasOwn(value, 'driveClientId') && typeof value.driveClientId === 'string'
       ? { driveClientId: value.driveClientId }
       : {}),

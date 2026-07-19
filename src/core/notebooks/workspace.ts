@@ -10,6 +10,7 @@ import type { IpcError } from '../fx/errors'
 import type { ConsoleScan } from '../ingest/sources/console'
 import { PorterClient, type PorterClientShape } from '../messaging'
 import type { SiteId } from '../model/types'
+import { preferredRouteForDocs } from '../routing/sticky'
 import { DEFAULT_SETTINGS, resolveNotebookTarget, type PorterSettings } from '../settings'
 import type { NotebookMeta } from './model'
 
@@ -47,14 +48,20 @@ export interface NotebookWorkspaceSnapshot {
   readonly driveError: string | undefined
   readonly pending: NotebookWorkspacePending
   readonly sourceConsole: SourceConsoleSnapshot
+  /** True while the current selection is a sticky route the user hasn't overridden — drives the "remembered" hint. */
+  readonly stickyPreselected: boolean
+  /** A still-known account the staged docs' sticky route lives on, when it differs from the active one; the popup switches to it. */
+  readonly pendingAccountSwitch: number | undefined
 }
 
 export interface NotebookWorkspace {
   readonly snapshot: () => NotebookWorkspaceSnapshot
   readonly subscribe: (listener: (snapshot: NotebookWorkspaceSnapshot) => void) => () => void
-  readonly updateDocs: (docs: readonly { site: SiteId }[]) => void
+  readonly updateDocs: (docs: readonly { site: SiteId; canonicalUrl?: string }[]) => void
   /** Rejects a popup-open bootstrap without disturbing user-dispatched operations. */
   readonly supersedeBootstrap: () => void
+  /** Marks that the user has taken manual control of the target, halting sticky preselection and auto account-switching for the session. */
+  readonly markManualTarget: () => void
   readonly selectNotebook: (notebookId: string) => void
   readonly editNewNotebookTitle: (title: string) => void
   readonly bootstrap: () => Effect.Effect<void, never, PorterClient>
@@ -91,11 +98,17 @@ function copySettings(settings: PorterSettings): DeepReadonly<PorterSettings> {
     ...settings,
     accounts: settings.accounts.map((account) => ({ ...account })),
     notebookTargets: { ...settings.notebookTargets },
+    stickyRoutes: { ...settings.stickyRoutes },
   }
 }
 
 function initialSettings(): DeepReadonly<PorterSettings> {
-  return copySettings({ ...DEFAULT_SETTINGS, accounts: [], notebookTargets: {} })
+  return copySettings({
+    ...DEFAULT_SETTINGS,
+    accounts: [],
+    notebookTargets: {},
+    stickyRoutes: {},
+  })
 }
 
 function initialPending(): NotebookWorkspacePending {
@@ -160,8 +173,13 @@ export function makeNotebookWorkspace(): NotebookWorkspace {
     driveError: undefined,
     pending: initialPending(),
     sourceConsole: initialSourceConsole(),
+    stickyPreselected: false,
+    pendingAccountSwitch: undefined,
   }
-  let docs: readonly { site: SiteId }[] = []
+  let docs: readonly { site: SiteId; canonicalUrl: string }[] = []
+  // Sticky routing: once the user touches the notebook picker themselves, the
+  // remembered route stops preselecting for the rest of this popup session.
+  let manualNotebookPick = false
   let accountGeneration = 0
   let bootstrapGeneration = 0
   let activeBootstrap: number | undefined
@@ -175,7 +193,46 @@ export function makeNotebookWorkspace(): NotebookWorkspace {
   let hasLocalDriveClientId = false
   const listeners = new Set<(snapshot: NotebookWorkspaceSnapshot) => void>()
 
-  function publish(next: NotebookWorkspaceSnapshot): void {
+  /** Whether the current selection is the sticky route the user hasn't overridden — the "remembered" hint. */
+  function stickyPreselectedFor(next: NotebookWorkspaceSnapshot): boolean {
+    if (manualNotebookPick || next.selectedNotebookId === '') return false
+    const preferred = preferredRouteForDocs(next.settings.stickyRoutes, docs)
+    return preferred !== undefined && preferred.notebookId === next.selectedNotebookId
+  }
+
+  /** A still-known account the staged docs' sticky route lives on, when it differs from the active one. */
+  function pendingAccountSwitchFor(next: NotebookWorkspaceSnapshot): number | undefined {
+    if (
+      manualNotebookPick ||
+      next.pending.bootstrap ||
+      next.pending.discover ||
+      next.pending.switchAccount
+    ) {
+      return undefined
+    }
+    const preferred = preferredRouteForDocs(next.settings.stickyRoutes, docs)
+    if (preferred === undefined || preferred.authuser === next.settings.nblmAuthuser) {
+      return undefined
+    }
+    return next.settings.accounts.some((account) => account.authuser === preferred.authuser)
+      ? preferred.authuser
+      : undefined
+  }
+
+  function withStickyRouting(next: NotebookWorkspaceSnapshot): NotebookWorkspaceSnapshot {
+    const stickyPreselected = stickyPreselectedFor(next)
+    const pendingAccountSwitch = pendingAccountSwitchFor(next)
+    if (
+      next.stickyPreselected === stickyPreselected &&
+      next.pendingAccountSwitch === pendingAccountSwitch
+    ) {
+      return next
+    }
+    return { ...next, stickyPreselected, pendingAccountSwitch }
+  }
+
+  function publish(raw: NotebookWorkspaceSnapshot): void {
+    const next = withStickyRouting(raw)
     if (!sameOptionalNotebookTarget(sourceConsoleTarget(state), sourceConsoleTarget(next))) {
       sourceConsoleGeneration += 1
       state = {
@@ -301,18 +358,35 @@ export function makeNotebookWorkspace(): NotebookWorkspace {
     })
   }
 
+  /**
+   * Selection for a freshly listed catalog. An explicit choice (a valid
+   * current selection or a just-created notebook) always wins; otherwise the
+   * staged docs' sticky route (§routing/sticky) preselects, as long as the
+   * user hasn't overridden it and it lives on the active account; only then
+   * does the account-blind `notebookTargets` fallback apply.
+   */
+  function resolveListSelection(notebooks: readonly { id: string }[], preferredId: string): string {
+    if (notebooks.some((notebook) => notebook.id === preferredId)) return preferredId
+    if (!manualNotebookPick) {
+      const preferred = preferredRouteForDocs(state.settings.stickyRoutes, docs)
+      if (
+        preferred !== undefined &&
+        preferred.authuser === state.settings.nblmAuthuser &&
+        notebooks.some((notebook) => notebook.id === preferred.notebookId)
+      ) {
+        return preferred.notebookId
+      }
+    }
+    return resolveNotebookTarget(notebooks, docs, state.settings.notebookTargets, preferredId)
+  }
+
   function applyNotebookList(
     notebooks: readonly NotebookMeta[],
     preferredId = state.selectedNotebookId,
   ) {
     patch({
       notebooks: notebooks.map((notebook) => ({ ...notebook })),
-      selectedNotebookId: resolveNotebookTarget(
-        notebooks,
-        docs,
-        state.settings.notebookTargets,
-        preferredId,
-      ),
+      selectedNotebookId: resolveListSelection(notebooks, preferredId),
       error: undefined,
     })
   }
@@ -499,16 +573,24 @@ export function makeNotebookWorkspace(): NotebookWorkspace {
       return () => listeners.delete(listener)
     },
     updateDocs: (nextDocs) => {
-      docs = nextDocs.map(({ site }) => ({ site }))
+      docs = nextDocs.map((doc) => ({ site: doc.site, canonicalUrl: doc.canonicalUrl ?? '' }))
     },
     supersedeBootstrap: () => {
       if (activeBootstrap === undefined || state.pending.bootstrap !== true) return
       activeBootstrap = undefined
       setPending({ bootstrap: false })
     },
+    markManualTarget: () => {
+      if (manualNotebookPick) return
+      manualNotebookPick = true
+      // Republish so the derived sticky fields drop (hint hides, auto-switch stops).
+      patch({})
+    },
     selectNotebook: (notebookId) => {
       if (state.pending.create || activeSourceConsole !== undefined) return
       if (notebookId === '' || state.notebooks.some((notebook) => notebook.id === notebookId)) {
+        // A deliberate pick overrides sticky preselection for the rest of the session.
+        manualNotebookPick = true
         patch({ selectedNotebookId: notebookId })
       }
     },

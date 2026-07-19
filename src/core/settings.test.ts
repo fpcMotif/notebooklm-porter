@@ -49,6 +49,12 @@ describe('settings', () => {
         { authuser: 3, email: 'three@example.com', extra: true },
       ],
       notebookTargets: { reddit: 'nb-reddit', unknown: 'nb-unknown', youtube: '' },
+      stickyRoutes: {
+        'example.com': { notebookId: 'nb-web', authuser: 2, updatedAt: '2026-01-01T00:00:00.000Z' },
+        reddit: { notebookId: '', authuser: 0, updatedAt: '2026-01-01T00:00:00.000Z' },
+        youtube: { notebookId: 'nb-yt', authuser: -1, updatedAt: '2026-01-01T00:00:00.000Z' },
+        hackernews: { notebookId: 'nb-hn', authuser: 0 },
+      },
       driveClientId: 42,
       unknown: true,
     })
@@ -60,6 +66,9 @@ describe('settings', () => {
         { authuser: 3, email: 'three@example.com' },
       ],
       notebookTargets: { reddit: 'nb-reddit' },
+      stickyRoutes: {
+        'example.com': { notebookId: 'nb-web', authuser: 2, updatedAt: '2026-01-01T00:00:00.000Z' },
+      },
     })
   })
 

@@ -179,6 +179,7 @@ describe('popup refresh coordinator', () => {
         nblmAuthuser: 0,
         accounts: [{ authuser: 0, email: 'stale@example.com' }],
         notebookTargets: { reddit: 'stale-notebook' },
+        stickyRoutes: {},
       },
     })
     await firstBootstrap

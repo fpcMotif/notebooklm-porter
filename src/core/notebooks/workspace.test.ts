@@ -54,6 +54,7 @@ function settings(overrides: Partial<PorterSettings> = {}): PorterSettings {
     nblmAuthuser: 0,
     accounts: [{ ...account0 }, { ...account1 }],
     notebookTargets: {},
+    stickyRoutes: {},
     ...overrides,
   }
 }
