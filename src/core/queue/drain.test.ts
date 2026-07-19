@@ -2,13 +2,22 @@ import { assert, describe, it } from '@effect/vitest'
 import { Effect, Layer } from 'effect'
 import { FetchError, HttpStatusError, ProtocolDrift } from '../fx/errors'
 import { Http, type HttpInit } from '../fx/services'
+import type { DebugEntry } from '../debug'
 import { alarmsTest, debugLogTest, domTabsTest, kvTest } from '../fx/testing'
 import type { DomDeliveryRequest, DomDeliveryResult } from '../ingest/dom/contracts'
 import { TIER_STATE_STORAGE_KEY, type TierState } from '../ingest/tier-state'
 import type { IngestUnit } from '../ingest/units'
 import { RPC_IDS } from '../ingest/rpc/protocol'
 import { contentHash } from '../store/ledger'
-import { QUEUE_ALARM, QUEUE_STORAGE_KEY, emptyQueue, enqueueUnits } from './queue'
+import {
+  QUEUE_ALARM,
+  QUEUE_STORAGE_KEY,
+  emptyQueue,
+  enqueueUnits,
+  markInFlight,
+  reapInterrupted,
+  retryJob,
+} from './queue'
 import { classifyQueueFailure, drainQueue } from './drain'
 
 const NOW = '2026-07-11T00:00:00.000Z'
@@ -48,6 +57,27 @@ function rpcRefusedResponse(): string {
   return `)]}'\n${frame.length}\n${frame}\n`
 }
 
+/** GET_NOTEBOOK (rLM1Ne) response; `rows === null` is an empty notebook. */
+function listSourcesResponse(rows: unknown[] | null = null): string {
+  // parseNotebookSources expects result[0] = [meta, rows] — one nesting level.
+  const payload = JSON.stringify([['notebook-meta', rows]])
+  const frame = JSON.stringify([['wrb.fr', RPC_IDS.getNotebook, payload]])
+  return `)]}'\n${frame.length}\n${frame}\n`
+}
+
+function youtubeSourceRow(id: string, url: string, statusCode = 2): unknown[] {
+  return [[id], 'Video', [null, null, null, null, 9, [url]], [null, statusCode]]
+}
+
+const youtubeUrl = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
+const youtubeUnit: IngestUnit = {
+  kind: 'youtube',
+  docId: 'youtube:PL123',
+  id: 'youtube:dQw4w9WgXcQ',
+  contentHash: contentHash(youtubeUrl),
+  url: youtubeUrl,
+}
+
 function runtime(
   opts: {
     accountEmail?: string
@@ -58,6 +88,9 @@ function runtime(
     sourceResponse?: string
     listedNotebookId?: string
     listProtocolDrift?: boolean
+    sourcesResponse?: string
+    sourcesProtocolDrift?: boolean
+    sourcesFailure?: FetchError | HttpStatusError
     domResult?: DomDeliveryResult
     domAvailable?: boolean
     tierState?: TierState
@@ -72,7 +105,9 @@ function runtime(
   const alarms: Array<{ type: 'schedule' | 'clear'; name: string; when?: number }> = []
   let posts = 0
   let listCalls = 0
+  let sourceListCalls = 0
   let sessionCalls = 0
+  const logs: DebugEntry[] = []
   const domRequests: DomDeliveryRequest[] = []
 
   const kv = kvTest(values, writes)
@@ -91,6 +126,12 @@ function runtime(
             }
             return Effect.succeed(listNotebooksResponse(opts.listedNotebookId))
           }
+          if (init.body?.includes(RPC_IDS.getNotebook)) {
+            sourceListCalls += 1
+            if (opts.sourcesFailure !== undefined) return Effect.fail(opts.sourcesFailure)
+            if (opts.sourcesProtocolDrift) return Effect.succeed(protocolDriftResponse())
+            return Effect.succeed(opts.sourcesResponse ?? listSourcesResponse())
+          }
           posts += 1
           if (opts.postFailure !== undefined) return Effect.fail(opts.postFailure)
           return Effect.succeed(opts.sourceResponse ?? addSourceResponse())
@@ -106,7 +147,7 @@ function runtime(
       json: () => Effect.die('not used'),
     }),
   )
-  const debug = debugLogTest()
+  const debug = debugLogTest(logs)
   const alarmsLayer = alarmsTest({
     onSchedule: (name, when) => {
       alarms.push({ type: 'schedule', name, when })
@@ -134,8 +175,10 @@ function runtime(
     domRequests,
     layer: Layer.mergeAll(kv, http, debug, alarmsLayer, domTabs),
     listCalls: () => listCalls,
+    logs,
     posts: () => posts,
     sessionCalls: () => sessionCalls,
+    sourceListCalls: () => sourceListCalls,
     values,
     writes,
   }
@@ -457,6 +500,138 @@ describe('drainQueue', () => {
       assert.strictEqual(fx.posts(), 0)
       const finalQueue = fx.values.get(QUEUE_STORAGE_KEY) as ReturnType<typeof emptyQueue>
       assert.strictEqual(finalQueue.jobs[0]?.status, 'uncertain')
+    }),
+  )
+
+  it.effect('reads notebook sources once per notebook and skips a server-present unit unsent', () =>
+    Effect.gen(function* () {
+      const fx = runtime({
+        queue: enqueueUnits(emptyQueue(), target, [youtubeUnit], NOW),
+        sourcesResponse: listSourcesResponse([
+          youtubeSourceRow('src-yt', 'https://youtu.be/dQw4w9WgXcQ'),
+        ]),
+      })
+
+      const result = yield* drainQueue({ now: NOW }).pipe(Effect.provide(fx.layer))
+
+      assert.strictEqual(result.status, 'sent')
+      assert.strictEqual(fx.posts(), 0)
+      assert.strictEqual(fx.sourceListCalls(), 1)
+      assert.ok(fx.logs.some((entry) => entry.msg === 'skip server-present'))
+      const finalQueue = fx.values.get(QUEUE_STORAGE_KEY) as ReturnType<typeof emptyQueue>
+      assert.strictEqual(finalQueue.jobs.length, 0)
+      assert.deepStrictEqual(fx.values.get('porter/ledger'), {
+        'nb-1': {
+          'youtube:dQw4w9WgXcQ': { contentHash: youtubeUnit.contentHash, lastSynced: NOW },
+        },
+      })
+    }),
+  )
+
+  it.effect('reuses one source listing across a burst and still sends absent units', () =>
+    Effect.gen(function* () {
+      const present = youtubeUnit
+      const absentA: IngestUnit = {
+        kind: 'youtube',
+        docId: 'youtube:PL123',
+        id: 'youtube:aaaaaaaaaaa',
+        contentHash: contentHash('https://www.youtube.com/watch?v=aaaaaaaaaaa'),
+        url: 'https://www.youtube.com/watch?v=aaaaaaaaaaa',
+      }
+      const absentB: IngestUnit = {
+        kind: 'youtube',
+        docId: 'youtube:PL123',
+        id: 'youtube:bbbbbbbbbbb',
+        contentHash: contentHash('https://www.youtube.com/watch?v=bbbbbbbbbbb'),
+        url: 'https://www.youtube.com/watch?v=bbbbbbbbbbb',
+      }
+      const fx = runtime({
+        queue: enqueueUnits(emptyQueue(), target, [present, absentA, absentB], NOW),
+        sourcesResponse: listSourcesResponse([
+          youtubeSourceRow('src-yt', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'),
+        ]),
+      })
+
+      const result = yield* drainQueue({ now: NOW }).pipe(Effect.provide(fx.layer))
+
+      assert.strictEqual(result.status, 'sent')
+      assert.strictEqual(fx.sourceListCalls(), 1)
+      assert.strictEqual(fx.posts(), 2)
+      const ledger = fx.values.get('porter/ledger') as Record<string, Record<string, unknown>>
+      assert.ok(ledger['nb-1']?.['youtube:dQw4w9WgXcQ'] !== undefined)
+      assert.ok(ledger['nb-1']?.['youtube:aaaaaaaaaaa'] !== undefined)
+      assert.ok(ledger['nb-1']?.['youtube:bbbbbbbbbbb'] !== undefined)
+    }),
+  )
+
+  it.effect('retries and stops the burst when the source listing is unreachable', () =>
+    Effect.gen(function* () {
+      const fx = runtime({
+        queue: enqueueUnits(emptyQueue(), target, [youtubeUnit, unit], NOW),
+        sourcesFailure: new FetchError({
+          url: 'https://notebooklm.google.com',
+          cause: 'offline',
+        }),
+      })
+
+      const result = yield* drainQueue({ now: NOW }).pipe(Effect.provide(fx.layer))
+
+      assert.deepStrictEqual(result, {
+        status: 'retrying',
+        jobId: `f@example.com:nb-1:${youtubeUnit.id}:${youtubeUnit.contentHash}`,
+      })
+      assert.strictEqual(fx.posts(), 0)
+      assert.strictEqual(fx.sourceListCalls(), 1)
+      const finalQueue = fx.values.get(QUEUE_STORAGE_KEY) as ReturnType<typeof emptyQueue>
+      assert.strictEqual(finalQueue.jobs[0]?.status, 'retrying')
+      assert.strictEqual(finalQueue.jobs[1]?.status, 'queued')
+    }),
+  )
+
+  it.effect('blocks on a drifted source listing without mutating or cooling the account down', () =>
+    Effect.gen(function* () {
+      const fx = runtime({
+        queue: enqueueUnits(emptyQueue(), target, [youtubeUnit], NOW),
+        sourcesProtocolDrift: true,
+      })
+
+      const result = yield* drainQueue({ now: NOW }).pipe(Effect.provide(fx.layer))
+
+      assert.deepStrictEqual(result, {
+        status: 'blocked',
+        jobId: `f@example.com:nb-1:${youtubeUnit.id}:${youtubeUnit.contentHash}`,
+      })
+      assert.strictEqual(fx.posts(), 0)
+      assert.strictEqual(fx.values.get(TIER_STATE_STORAGE_KEY), undefined)
+      const finalQueue = fx.values.get(QUEUE_STORAGE_KEY) as ReturnType<typeof emptyQueue>
+      assert.strictEqual(finalQueue.jobs[0]?.status, 'blocked')
+    }),
+  )
+
+  it.effect('drops a retried uncertain job when the original send already landed server-side', () =>
+    Effect.gen(function* () {
+      const queued = enqueueUnits(emptyQueue(), target, [youtubeUnit], NOW)
+      const job = queued.jobs[0]
+      if (job === undefined) throw new Error('Expected queued fixture job')
+      const uncertain = reapInterrupted(markInFlight(queued, job.id, NOW), NOW)
+      const retried = retryJob(uncertain, job.id, NOW)
+      const fx = runtime({
+        queue: retried,
+        sourcesResponse: listSourcesResponse([youtubeSourceRow('src-yt', youtubeUrl)]),
+      })
+
+      const result = yield* drainQueue({ now: NOW }).pipe(Effect.provide(fx.layer))
+
+      assert.strictEqual(result.status, 'sent')
+      assert.strictEqual(fx.posts(), 0)
+      assert.ok(fx.logs.some((entry) => entry.msg === 'skip server-present'))
+      const finalQueue = fx.values.get(QUEUE_STORAGE_KEY) as ReturnType<typeof emptyQueue>
+      assert.strictEqual(finalQueue.jobs.length, 0)
+      assert.deepStrictEqual(fx.values.get('porter/ledger'), {
+        'nb-1': {
+          'youtube:dQw4w9WgXcQ': { contentHash: youtubeUnit.contentHash, lastSynced: NOW },
+        },
+      })
     }),
   )
 
