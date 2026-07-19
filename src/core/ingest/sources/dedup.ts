@@ -126,7 +126,7 @@ export function findDuplicateGroups(sources: readonly NotebookSource[]): Duplica
 }
 
 /** The best copy to keep. `reduce` with no seed is safe — callers pass ≥1 source. */
-function pickKeeper(bucket: readonly NotebookSource[]): NotebookSource {
+export function pickKeeper(bucket: readonly NotebookSource[]): NotebookSource {
   return bucket.reduce((best, candidate) =>
     STATUS_KEEP_RANK[candidate.status] < STATUS_KEEP_RANK[best.status] ? candidate : best,
   )
