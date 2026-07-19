@@ -139,8 +139,9 @@ export function resyncOneDueWatch(
     const complete = rescheduleWatchSuccess(watches, watch.id, now)
     yield* saveWatches(complete)
     yield* armNextWatch(complete)
-    // An all-synced tick has nothing for the drain to do — don't wake it.
-    if (pending.length > 0) {
+    // Wake the drain whenever the persisted queue is nonempty. Even an
+    // all-synced tick may retain a receipted job from an interrupted cleanup.
+    if (nextQueue.jobs.length > 0) {
       const alarms = yield* Alarms
       yield* alarms.schedule(QUEUE_ALARM, Date.parse(now))
     }

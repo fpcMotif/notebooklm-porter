@@ -2,7 +2,7 @@ import { assert, describe, it } from '@effect/vitest'
 import { Effect, Layer } from 'effect'
 import realMixPanel from '../adapters/youtube/fixture-mix-panel.json'
 import { alarmsTest, debugLogTest, httpTest, kvTest } from '../fx/testing'
-import { QUEUE_ALARM } from '../queue/queue'
+import { QUEUE_ALARM, QUEUE_STORAGE_KEY, emptyQueue, enqueueUnits } from '../queue/queue'
 import { loadQueue } from '../queue/store'
 import { contentHash } from '../store/ledger'
 import { loadWatches } from './store'
@@ -36,9 +36,14 @@ function layer(
   http: Record<string, string | string[]> = { [HN_API_URL]: JSON.stringify(HN_ITEM) },
   alarmCalls: Array<[string, number | 'clear']> = [],
   ledger: Record<string, unknown> = {},
+  queue = emptyQueue(),
 ) {
   return Layer.mergeAll(
-    kvTest({ 'porter/watch/v1': watches, 'porter/ledger': ledger }),
+    kvTest({
+      'porter/watch/v1': watches,
+      'porter/ledger': ledger,
+      [QUEUE_STORAGE_KEY]: queue,
+    }),
     debugLogTest(),
     httpTest(http),
     alarmsTest({
@@ -177,6 +182,31 @@ describe('resyncOneDueWatch — ledger dedup', () => {
         const watches = yield* loadWatches().pipe(Effect.provide(testLayer))
         assert.strictEqual(watches.watches[0]?.lastResyncedAt, NOW)
       }),
+  )
+
+  it.effect('wakes the drain to remove a queued unit that became receipted', () =>
+    Effect.gen(function* () {
+      const probeLayer = layer(dueWatch())
+      yield* resyncOneDueWatch({ now: NOW }).pipe(Effect.provide(probeLayer))
+      const probed = yield* loadQueue().pipe(Effect.provide(probeLayer))
+      const unit = probed.jobs[0]?.unit
+      if (unit === undefined) throw new Error('expected a probed unit')
+
+      const ledger = {
+        [target.notebookId]: {
+          [unit.id]: { contentHash: unit.contentHash, lastSynced: EARLIER },
+        },
+      }
+      const queue = enqueueUnits(emptyQueue(), target, [unit], EARLIER)
+      const alarms: Array<[string, number | 'clear']> = []
+      const testLayer = layer(dueWatch(), undefined, alarms, ledger, queue)
+
+      yield* resyncOneDueWatch({ now: NOW }).pipe(Effect.provide(testLayer))
+
+      const persisted = yield* loadQueue().pipe(Effect.provide(testLayer))
+      assert.strictEqual(persisted.jobs.length, 1)
+      assert.isTrue(alarms.some(([name]) => name === QUEUE_ALARM))
+    }),
   )
 
   it.effect('enqueues only the units not already receipted, from a mixed playlist batch', () =>
