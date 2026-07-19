@@ -1,5 +1,6 @@
 import { assert, describe, it } from '@effect/vitest'
 import { Effect, Layer, Result } from 'effect'
+import type { DebugEntry } from '../debug'
 import { HttpStatusError } from '../fx/errors'
 import { debugLogTest, kvTest, scriptingTest } from '../fx/testing'
 import { Http } from '../fx/services'
@@ -19,11 +20,12 @@ function layer(
     page?: { title: string; text: string }
     hn?: boolean
     hnFailure?: HttpStatusError
+    debugSink?: DebugEntry[]
   } = {},
 ) {
   return Layer.mergeAll(
     kvTest(),
-    debugLogTest(),
+    debugLogTest(opts.debugSink ?? []),
     scriptingTest({ onExtractPageText: () => opts.page ?? { title: '', text: '' } }),
     Layer.succeed(
       Http,
@@ -83,6 +85,18 @@ describe('captureContextMenuClick', () => {
     }),
   )
 
+  it.effect('falls back to generic capture for an invalid supported-host link', () =>
+    Effect.gen(function* () {
+      const doc = yield* captureContextMenuClick({
+        menuId: CONTEXT_MENU_IDS.link,
+        linkUrl: 'https://www.reddit.com/r/test/',
+      }).pipe(Effect.provide(layer()))
+
+      assert.strictEqual(doc?.kind, 'web')
+      assert.strictEqual(doc?.site, 'web')
+    }),
+  )
+
   it.effect('uses a background URL adapter for a supported linked discussion', () =>
     Effect.gen(function* () {
       const doc = yield* captureContextMenuClick({
@@ -127,6 +141,21 @@ describe('captureContextMenuClick', () => {
 
       assert.isUndefined(doc)
       assert.deepStrictEqual(yield* listDocs().pipe(Effect.provide(testLayer)), [])
+    }),
+  )
+
+  it.effect('a stored selection now logs a content-free "capture stored" debug entry', () =>
+    Effect.gen(function* () {
+      const debugSink: DebugEntry[] = []
+      const doc = yield* captureContextMenuClick({
+        menuId: CONTEXT_MENU_IDS.selection,
+        pageUrl: 'https://example.com/article',
+        pageTitle: 'An article',
+        selectionText: 'selected text',
+      }).pipe(Effect.provide(layer({ debugSink })))
+
+      assert.isDefined(doc)
+      assert.isTrue(debugSink.some((entry) => entry.scope === 'capture' && entry.msg === 'stored'))
     }),
   )
 })

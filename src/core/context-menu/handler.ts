@@ -1,10 +1,11 @@
 import { Effect, Result } from 'effect'
-import { adapterForUrl } from '../adapters/registry'
+import { captureResolvedUrl, isResolvedUrlCapturable } from '../adapters/capture'
+import { resolveCapturable } from '../adapters/registry'
 import type { PorterError, StorageError } from '../fx/errors'
 import { DebugLog, Http, Scripting, type Kv } from '../fx/services'
 import { formatCapture } from '../format/format'
 import type { Capture, SourceDoc } from '../model/types'
-import { upsertDoc } from '../store'
+import { storeCapturedDoc } from '../store'
 import { createWebCapture } from './capture'
 
 export const CONTEXT_MENU_IDS = {
@@ -28,31 +29,35 @@ export function isContextMenuId(value: unknown): value is ContextMenuId {
   return Object.values(CONTEXT_MENU_IDS).includes(value as ContextMenuId)
 }
 
-function storeCapture(capture: Capture): Effect.Effect<SourceDoc, StorageError, Kv> {
+function storeCapture(capture: Capture): Effect.Effect<SourceDoc, StorageError, DebugLog | Kv> {
   const doc = formatCapture(capture)
-  return upsertDoc(doc).pipe(Effect.as(doc))
+  return storeCapturedDoc(doc).pipe(Effect.as(doc))
 }
 
-function genericLinkCapture(click: ContextMenuClick): Capture | undefined {
-  if (click.linkUrl === undefined) return undefined
-  const web = createWebCapture({
-    mode: 'link',
-    url: click.linkUrl,
-    text: click.linkUrl,
-    ...(click.pageTitle !== undefined ? { title: click.pageTitle } : {}),
-  })
-  return web === undefined ? undefined : { kind: 'web', web }
+function genericLinkCapture(click: ContextMenuClick): Effect.Effect<Capture | undefined> {
+  const { linkUrl } = click
+  if (linkUrl === undefined) return Effect.succeed(undefined)
+  return Effect.promise(() =>
+    createWebCapture({
+      mode: 'link',
+      url: linkUrl,
+      text: linkUrl,
+      ...(click.pageTitle !== undefined ? { title: click.pageTitle } : {}),
+    }),
+  ).pipe(Effect.map((web) => (web === undefined ? undefined : { kind: 'web', web })))
 }
 
-function genericSelectionCapture(click: ContextMenuClick): Capture | undefined {
-  if (click.pageUrl === undefined || click.selectionText === undefined) return undefined
-  const web = createWebCapture({
-    mode: 'selection',
-    url: click.pageUrl,
-    text: click.selectionText,
-    ...(click.pageTitle !== undefined ? { title: click.pageTitle } : {}),
-  })
-  return web === undefined ? undefined : { kind: 'web', web }
+function genericSelectionCapture(click: ContextMenuClick): Effect.Effect<Capture | undefined> {
+  const { pageUrl, selectionText } = click
+  if (pageUrl === undefined || selectionText === undefined) return Effect.succeed(undefined)
+  return Effect.promise(() =>
+    createWebCapture({
+      mode: 'selection',
+      url: pageUrl,
+      text: selectionText,
+      ...(click.pageTitle !== undefined ? { title: click.pageTitle } : {}),
+    }),
+  ).pipe(Effect.map((web) => (web === undefined ? undefined : { kind: 'web', web })))
 }
 
 function genericPageCapture(
@@ -76,12 +81,14 @@ function genericPageCapture(
       return undefined
     }
     const title = extracted.success.title || click.pageTitle
-    const web = createWebCapture({
-      mode: 'page',
-      url: pageUrl,
-      text: extracted.success.text,
-      ...(title !== undefined ? { title } : {}),
-    })
+    const web = yield* Effect.promise(() =>
+      createWebCapture({
+        mode: 'page',
+        url: pageUrl,
+        text: extracted.success.text,
+        ...(title !== undefined ? { title } : {}),
+      }),
+    )
     return web === undefined ? undefined : { kind: 'web', web }
   })
 }
@@ -89,11 +96,9 @@ function genericPageCapture(
 function adapterLinkCapture(
   linkUrl: string,
 ): Effect.Effect<SourceDoc | undefined, PorterError, Http | DebugLog | Kv> {
-  const adapter = adapterForUrl(linkUrl)
-  const captureFromUrl = adapter?.contentScript ? undefined : adapter?.captureFromUrl
-  if (captureFromUrl === undefined || adapter?.detect(linkUrl) === null)
-    return Effect.succeed(undefined)
-  return captureFromUrl(linkUrl).pipe(Effect.flatMap(storeCapture))
+  const resolved = resolveCapturable(linkUrl)
+  if (resolved === undefined || !isResolvedUrlCapturable(resolved)) return Effect.succeed(undefined)
+  return captureResolvedUrl(resolved).pipe(Effect.flatMap(storeCapture))
 }
 
 /**
@@ -105,8 +110,11 @@ export function captureContextMenuClick(
   click: ContextMenuClick,
 ): Effect.Effect<SourceDoc | undefined, PorterError, Http | DebugLog | Kv | Scripting> {
   if (click.menuId === CONTEXT_MENU_IDS.selection) {
-    const capture = genericSelectionCapture(click)
-    return capture === undefined ? Effect.succeed(undefined) : storeCapture(capture)
+    return genericSelectionCapture(click).pipe(
+      Effect.flatMap((capture) =>
+        capture === undefined ? Effect.succeed(undefined) : storeCapture(capture),
+      ),
+    )
   }
 
   if (click.menuId === CONTEXT_MENU_IDS.page) {
@@ -124,12 +132,12 @@ export function captureContextMenuClick(
     if (adapterDoc !== undefined) {
       yield* debugLog.log('context-menu', 'link captured', {
         via: 'adapter',
-        adapterId: adapterForUrl(linkUrl)?.id ?? 'none',
+        adapterId: adapterDoc.site,
         docId: adapterDoc.id,
       })
       return adapterDoc
     }
-    const capture = genericLinkCapture(click)
+    const capture = yield* genericLinkCapture(click)
     if (capture === undefined) {
       yield* debugLog.log('context-menu', 'link capture rejected', {}, { level: 'warn' })
       return undefined

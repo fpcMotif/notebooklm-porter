@@ -1,3 +1,4 @@
+import { isRecord } from '../../fx/guards'
 import type { MediaRef } from '../../model/types'
 import type { RawTweet } from './extract'
 
@@ -5,14 +6,11 @@ export const X_GRAPHQL_TEE_EVENT = 'porter:x-graphql-response'
 export const X_GRAPHQL_TEE_MAX_BODY_CHARS = 2_000_000
 
 const THREAD_OPERATIONS = new Set(['TweetDetail', 'TweetResultByRestId'])
+const X_THREAD_EVIDENCE_MAX_TWEETS = 1000
 
 export interface GraphqlTeeEventDetail {
   url: string
   body: string
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function recordAt(value: unknown, key: string): Record<string, unknown> | undefined {
@@ -29,6 +27,66 @@ function arrayAt(value: unknown, key: string): unknown[] {
 
 function firstString(...values: Array<string | undefined>): string | undefined {
   return values.find((value) => value !== undefined && value.length > 0)
+}
+
+function longerText(first: string, second: string): string {
+  return second.length > first.length ? second : first
+}
+
+function mergeLinks(
+  floor: readonly string[] | undefined,
+  observed: readonly string[] | undefined,
+): string[] | undefined {
+  const links = [...new Set([...(floor ?? []), ...(observed ?? [])])]
+  return links.length > 0 ? links : undefined
+}
+
+function mergeMedia(
+  floor: readonly MediaRef[] | undefined,
+  observed: readonly MediaRef[] | undefined,
+): MediaRef[] | undefined {
+  const media = new Map<string, MediaRef>()
+  for (const item of [...(floor ?? []), ...(observed ?? [])]) {
+    const key = `${item.kind}\u0000${item.url}`
+    const existing = media.get(key)
+    if (existing === undefined) {
+      media.set(key, item)
+      continue
+    }
+    if ((item.alt?.length ?? 0) > (existing.alt?.length ?? 0)) media.set(key, item)
+  }
+  return media.size > 0 ? [...media.values()] : undefined
+}
+
+function mergeTweetEvidence(floor: RawTweet, observed: RawTweet): RawTweet {
+  const useObservedQuote = (observed.quotedText?.length ?? 0) > (floor.quotedText?.length ?? 0)
+  const quotedText = useObservedQuote ? observed.quotedText : floor.quotedText
+  const quotedAuthorHandle = useObservedQuote
+    ? (observed.quotedAuthorHandle ?? floor.quotedAuthorHandle)
+    : (floor.quotedAuthorHandle ?? observed.quotedAuthorHandle)
+  const links = mergeLinks(floor.links, observed.links)
+  const media = mergeMedia(floor.media, observed.media)
+
+  return {
+    id: floor.id,
+    authorHandle: floor.authorHandle,
+    authorName: floor.authorName,
+    text: longerText(floor.text, observed.text),
+    ...(floor.timestamp !== undefined
+      ? { timestamp: floor.timestamp }
+      : observed.timestamp !== undefined
+        ? { timestamp: observed.timestamp }
+        : {}),
+    ...(floor.conversationId !== undefined
+      ? { conversationId: floor.conversationId }
+      : observed.conversationId !== undefined
+        ? { conversationId: observed.conversationId }
+        : {}),
+    ...(quotedAuthorHandle !== undefined ? { quotedAuthorHandle } : {}),
+    ...(quotedText !== undefined ? { quotedText } : {}),
+    ...(links !== undefined ? { links } : {}),
+    ...(media !== undefined ? { media } : {}),
+  }
 }
 
 /** True only for page-owned thread result requests; Porter never makes this request itself. */
@@ -163,8 +221,7 @@ export function tweetsFromGraphql(payload: unknown): RawTweet[] {
     const tweet = tweetFromGraphql(value)
     if (tweet !== undefined) {
       const existing = tweets.get(tweet.id)
-      if (existing === undefined || tweet.text.length > existing.text.length)
-        tweets.set(tweet.id, tweet)
+      tweets.set(tweet.id, existing === undefined ? tweet : mergeTweetEvidence(existing, tweet))
     }
     if (Array.isArray(value)) {
       for (const item of value) visit(item)
@@ -183,24 +240,133 @@ export function tweetsFromGraphql(payload: unknown): RawTweet[] {
  * defines the graph boundary.
  */
 export function tweetsForStatus(tweets: readonly RawTweet[], statusId: string): RawTweet[] {
-  const requested = tweets.find((tweet) => tweet.id === statusId)
-  if (requested === undefined) return []
-
-  const conversationId = requested.conversationId ?? requested.id
+  const conversationId = conversationIdForStatus(tweets, statusId)
+  if (conversationId === undefined) return []
   return tweets.filter(
     (tweet) => tweet.id === conversationId || tweet.conversationId === conversationId,
   )
 }
 
-/**
- * Passive GraphQL observation can enrich a DOM capture, but must never shrink
- * it. Prefer it only when it covers every tweet the scroll drain found.
- */
-export function preferCompleteGraphqlThread(
+function conversationIdForStatus(
+  tweets: readonly RawTweet[],
+  statusId: string,
+): string | undefined {
+  const requested = tweets.find((tweet) => tweet.id === statusId)
+  return (
+    requested?.conversationId ??
+    requested?.id ??
+    (tweets.some((tweet) => tweet.conversationId === statusId) ? statusId : undefined)
+  )
+}
+
+function conversationIdForTweet(tweet: RawTweet): string {
+  return tweet.conversationId ?? tweet.id
+}
+
+function orderConversation(
+  tweets: readonly RawTweet[],
+  preferredIds: readonly string[] | undefined,
+): RawTweet[] {
+  if (preferredIds === undefined) return [...tweets]
+  const byId = new Map(tweets.map((tweet) => [tweet.id, tweet]))
+  const ordered = preferredIds.flatMap((id) => byId.get(id) ?? [])
+  const placed = new Set(ordered.map((tweet) => tweet.id))
+  return [...ordered, ...tweets.filter((tweet) => !placed.has(tweet.id))]
+}
+
+function reconcileXThread(
   graphTweets: readonly RawTweet[],
   domTweets: readonly RawTweet[],
 ): RawTweet[] {
   if (graphTweets.length === 0) return [...domTweets]
   const graphIds = new Set(graphTweets.map((tweet) => tweet.id))
-  return domTweets.every((tweet) => graphIds.has(tweet.id)) ? [...graphTweets] : [...domTweets]
+  const domById = new Map(domTweets.map((tweet) => [tweet.id, tweet]))
+
+  if (domTweets.every((tweet) => graphIds.has(tweet.id))) {
+    return graphTweets.map((tweet) => {
+      const domTweet = domById.get(tweet.id)
+      return domTweet === undefined ? tweet : mergeTweetEvidence(domTweet, tweet)
+    })
+  }
+
+  const graphById = new Map(graphTweets.map((tweet) => [tweet.id, tweet]))
+  return domTweets.map((tweet) => {
+    const graphTweet = graphById.get(tweet.id)
+    return graphTweet === undefined ? tweet : mergeTweetEvidence(tweet, graphTweet)
+  })
+}
+
+export interface XThreadEvidence {
+  observe(detail: unknown): void
+  resolve(statusId: string, domTweets: readonly RawTweet[]): RawTweet[]
+}
+
+/**
+ * Owns one document's bounded passive GraphQL evidence. DOM capture remains
+ * the floor; observations can enrich it but cannot shrink or weaken it.
+ */
+export function createXThreadEvidence(): XThreadEvidence {
+  const observedTweets = new Map<string, RawTweet>()
+  const preferredOrderByConversation = new Map<string, string[]>()
+
+  function removeFromPreferredOrders(tweetId: string): void {
+    for (const [conversationId, order] of preferredOrderByConversation) {
+      if (!order.includes(tweetId)) continue
+      const remaining = order.filter((id) => id !== tweetId)
+      if (remaining.length === 0) preferredOrderByConversation.delete(conversationId)
+      else preferredOrderByConversation.set(conversationId, remaining)
+    }
+  }
+
+  return {
+    observe(detail: unknown): void {
+      if (!isGraphqlTeeEventDetail(detail)) return
+      try {
+        const payload = JSON.parse(detail.body) as unknown
+        const observationOrder = new Map<string, string[]>()
+        for (const tweet of tweetsFromGraphql(payload)) {
+          const existing = observedTweets.get(tweet.id)
+          const merged = existing === undefined ? tweet : mergeTweetEvidence(existing, tweet)
+          if (
+            existing !== undefined &&
+            conversationIdForTweet(existing) !== conversationIdForTweet(merged)
+          ) {
+            removeFromPreferredOrders(tweet.id)
+          }
+          if (existing === undefined && observedTweets.size >= X_THREAD_EVIDENCE_MAX_TWEETS) {
+            const oldestId = observedTweets.keys().next().value
+            if (oldestId !== undefined) {
+              observedTweets.delete(oldestId)
+              removeFromPreferredOrders(oldestId)
+            }
+          }
+          observedTweets.set(tweet.id, merged)
+          const conversationId = conversationIdForTweet(merged)
+          const order = observationOrder.get(conversationId) ?? []
+          order.push(tweet.id)
+          observationOrder.set(conversationId, order)
+        }
+        for (const [conversationId, order] of observationOrder) {
+          const candidate = order.filter((id) => observedTweets.has(id))
+          if (candidate.length === 0) continue
+          const current = preferredOrderByConversation.get(conversationId) ?? []
+          // More rows give stronger order evidence; equal coverage favors the fresher response.
+          if (candidate.length >= current.length) {
+            preferredOrderByConversation.set(conversationId, candidate)
+          }
+        }
+      } catch {
+        // Malformed page evidence cannot invalidate the DOM capture floor.
+      }
+    },
+    resolve(statusId: string, domTweets: readonly RawTweet[]): RawTweet[] {
+      const observed = [...observedTweets.values()]
+      const conversationId = conversationIdForStatus(observed, statusId)
+      const graphTweets = orderConversation(
+        tweetsForStatus(observed, statusId),
+        conversationId === undefined ? undefined : preferredOrderByConversation.get(conversationId),
+      )
+      return reconcileXThread(graphTweets, domTweets)
+    },
+  }
 }

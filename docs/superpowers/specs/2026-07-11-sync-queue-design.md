@@ -9,7 +9,17 @@ recapture.
 
 Each queued job contains the unit, its originating document ids, and a target
 identity: notebook id, `authuser`, and the selected account email. Its stable
-deduplication key is account email + notebook id + unit id + content hash.
+deduplication key is a collision-safe serialization of that full target, unit
+id, and content hash. Receipts are hashes of immutable unit content scoped to
+the same full target. They are not remote NotebookLM source IDs and do not
+prove remote-source or notebook ownership.
+
+The ledger uses `porter/ledger/v2`. Unscoped v1 receipts keyed only by notebook
+id are not adopted: they cannot prove which positional account slot produced
+them, and a false receipt would skip required work. The first v2 delivery may
+therefore resend a source that v1 had recorded. This is safer than a false skip.
+Watch identities and queued-version supersession also use the full target, so
+two slots carrying the same email and notebook id never share state.
 
 ## Safety contract
 

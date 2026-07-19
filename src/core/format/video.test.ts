@@ -16,7 +16,10 @@ describe('videoToMarkdown', () => {
 
     expect(markdown).toContain('video_id: abcdefghijk')
     expect(markdown).toContain('title: "A video: title"')
-    expect(markdown).toContain('channel: "Channel"')
+    // Now routed through the shared yamlScalar (frontmatter.ts): a plain
+    // value with no YAML-special characters renders unquoted, matching every
+    // other writer's convention. Previously always-quoted via JSON.stringify.
+    expect(markdown).toContain('channel: Channel')
     expect(markdown).toContain('duration_seconds: 125')
   })
 })

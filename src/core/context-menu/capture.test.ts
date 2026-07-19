@@ -5,6 +5,7 @@ import {
   normalizeHttpUrl,
   normalizeWebText,
   normalizeWebTitle,
+  webCaptureId,
 } from './capture'
 
 describe('normalizeHttpUrl', () => {
@@ -33,8 +34,8 @@ describe('text normalization', () => {
 })
 
 describe('createWebCapture', () => {
-  it('creates a normalized page capture with a stable page-scoped id', () => {
-    const capture = createWebCapture({
+  it('creates a normalized page capture with a stable page-scoped id', async () => {
+    const capture = await createWebCapture({
       url: 'https://example.com/article',
       title: '  A   useful  article ',
       mode: 'page',
@@ -42,7 +43,7 @@ describe('createWebCapture', () => {
     })
 
     expect(capture).toEqual({
-      id: expect.stringMatching(/^page:[0-9a-f]{8}$/),
+      id: expect.stringMatching(/^page:[A-Za-z0-9_-]{43}$/),
       url: 'https://example.com/article',
       title: 'A useful article',
       mode: 'page',
@@ -50,8 +51,8 @@ describe('createWebCapture', () => {
     })
   })
 
-  it('uses a hostname fallback when a link has no title', () => {
-    const link = createWebCapture({
+  it('uses a hostname fallback when a link has no title', async () => {
+    const link = await createWebCapture({
       url: 'https://example.com/linked',
       title: '',
       mode: 'link',
@@ -61,12 +62,17 @@ describe('createWebCapture', () => {
     expect(link).toMatchObject({ title: 'example.com' })
   })
 
-  it('rejects invalid URLs and normalized-empty text', () => {
+  it('rejects invalid URLs and normalized-empty text', async () => {
     expect(
-      createWebCapture({ url: 'ftp://example.com', title: 'Nope', mode: 'page', text: 'Text' }),
+      await createWebCapture({
+        url: 'ftp://example.com',
+        title: 'Nope',
+        mode: 'page',
+        text: 'Text',
+      }),
     ).toBeUndefined()
     expect(
-      createWebCapture({
+      await createWebCapture({
         url: 'https://example.com',
         title: 'Empty',
         mode: 'selection',
@@ -75,15 +81,15 @@ describe('createWebCapture', () => {
     ).toBeUndefined()
   })
 
-  it('caps only page text at the named limit', () => {
+  it('caps only page text at the named limit', async () => {
     const longText = 'x'.repeat(MAX_PAGE_TEXT_LENGTH + 25)
-    const page = createWebCapture({
+    const page = await createWebCapture({
       url: 'https://example.com/page',
       title: 'Page',
       mode: 'page',
       text: longText,
     })
-    const selection = createWebCapture({
+    const selection = await createWebCapture({
       url: 'https://example.com/page',
       title: 'Page',
       mode: 'selection',
@@ -94,26 +100,38 @@ describe('createWebCapture', () => {
     expect(selection?.text).toHaveLength(MAX_PAGE_TEXT_LENGTH + 25)
   })
 
-  it('uses URL-only identities for page/link and selection text for selections', () => {
-    const pageOne = createWebCapture({
+  it('uses URL-only identities for page/link and selection text for selections', async () => {
+    const pageOne = await createWebCapture({
       url: 'https://example.com/article',
       title: 'Article',
       mode: 'page',
       text: 'First snapshot',
     })
-    const pageTwo = createWebCapture({
+    const pageTwo = await createWebCapture({
       url: 'https://example.com/article',
       title: 'Article',
       mode: 'page',
       text: 'Second snapshot',
     })
-    const selectionOne = createWebCapture({
+    const linkOne = await createWebCapture({
+      url: 'https://example.com/article',
+      title: 'Article',
+      mode: 'link',
+      text: 'First link label',
+    })
+    const linkTwo = await createWebCapture({
+      url: 'https://example.com/article',
+      title: 'Article',
+      mode: 'link',
+      text: 'Second link label',
+    })
+    const selectionOne = await createWebCapture({
       url: 'https://example.com/article',
       title: 'Article',
       mode: 'selection',
       text: 'First selection',
     })
-    const selectionTwo = createWebCapture({
+    const selectionTwo = await createWebCapture({
       url: 'https://example.com/article',
       title: 'Article',
       mode: 'selection',
@@ -121,6 +139,17 @@ describe('createWebCapture', () => {
     })
 
     expect(pageOne?.id).toBe(pageTwo?.id)
+    expect(linkOne?.id).toBe(linkTwo?.id)
     expect(selectionOne?.id).not.toBe(selectionTwo?.id)
+  })
+
+  it('uses stable, full-digest ids', async () => {
+    const first = await webCaptureId('page', 'https://example.com/article', 'first snapshot')
+    const second = await webCaptureId('page', 'https://example.com/article', 'second snapshot')
+    const otherUrl = await webCaptureId('page', 'https://example.com/other', 'first snapshot')
+
+    expect(first).toMatch(/^page:[A-Za-z0-9_-]{43}$/)
+    expect(second).toBe(first)
+    expect(otherUrl).not.toBe(first)
   })
 })

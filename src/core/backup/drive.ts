@@ -5,6 +5,7 @@
  * the shape everywhere below). No fetch, no `browser.*` — callers in
  * `capture.ts`/entrypoints own the actual network calls and OAuth redirect.
  */
+import { sha256Base64Url } from '../crypto'
 import { sanitizeFilenameBase } from '../filename'
 
 export interface DriveRequest {
@@ -16,8 +17,13 @@ export interface DriveRequest {
 
 const DRIVE_FILES_URL = 'https://www.googleapis.com/drive/v3/files'
 const DRIVE_UPLOAD_URL = 'https://www.googleapis.com/upload/drive/v3/files'
-const FOLDER_MIME = 'application/vnd.google-apps.folder'
-const MARKDOWN_MIME = 'text/markdown'
+export const DRIVE_FOLDER_MIME = 'application/vnd.google-apps.folder'
+export const DRIVE_MARKDOWN_MIME = 'text/markdown'
+export const DRIVE_ARTIFACT_PROPERTY = 'notebookLmPorterArtifact'
+export const DRIVE_FOLDER_ARTIFACT = 'backup-folder:v1'
+const SOURCE_ARTIFACT_PREFIX = 'source:v1:'
+const SHORT_DIGEST_LENGTH = 12
+const MAX_FILENAME_LENGTH = 100
 
 /**
  * Builds the implicit-grant (`token`) OAuth URL. `prompt=select_account`
@@ -89,8 +95,15 @@ function escapeDriveQueryValue(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
 }
 
-function filesListRequest(token: string, query: string): DriveRequest {
-  const params = new URLSearchParams({ q: query, fields: 'files(id,name)' })
+function filesListRequest(token: string, query: string, pageToken?: string): DriveRequest {
+  const params = new URLSearchParams({
+    q: query,
+    pageSize: '1000',
+    fields: 'nextPageToken,incompleteSearch,files(id,name,mimeType,appProperties)',
+  })
+  if (pageToken !== undefined) {
+    params.set('pageToken', pageToken)
+  }
   return {
     url: `${DRIVE_FILES_URL}?${params.toString()}`,
     method: 'GET',
@@ -98,26 +111,79 @@ function filesListRequest(token: string, query: string): DriveRequest {
   }
 }
 
-export function buildFindFolderRequest(token: string, name: string): DriveRequest {
+export function buildFindFolderRequest(
+  token: string,
+  name: string,
+  pageToken?: string,
+): DriveRequest {
   const escaped = escapeDriveQueryValue(name)
-  const query = `name='${escaped}' and mimeType='${FOLDER_MIME}' and trashed=false`
-  return filesListRequest(token, query)
+  const query = `name='${escaped}' and mimeType='${DRIVE_FOLDER_MIME}' and trashed=false`
+  return filesListRequest(token, query, pageToken)
+}
+
+function appPropertyQuery(value: string): string {
+  return `appProperties has { key='${DRIVE_ARTIFACT_PROPERTY}' and value='${escapeDriveQueryValue(value)}' }`
+}
+
+export function buildFindManagedFolderRequest(token: string, pageToken?: string): DriveRequest {
+  const query = `${appPropertyQuery(DRIVE_FOLDER_ARTIFACT)} and mimeType='${DRIVE_FOLDER_MIME}' and trashed=false`
+  return filesListRequest(token, query, pageToken)
 }
 
 export function buildCreateFolderRequest(token: string, name: string): DriveRequest {
   return {
-    url: DRIVE_FILES_URL,
+    url: `${DRIVE_FILES_URL}?fields=id`,
     method: 'POST',
     headers: authHeaders(token, { 'Content-Type': 'application/json' }),
-    body: JSON.stringify({ name, mimeType: FOLDER_MIME }),
+    body: JSON.stringify({
+      name,
+      mimeType: DRIVE_FOLDER_MIME,
+      appProperties: { [DRIVE_ARTIFACT_PROPERTY]: DRIVE_FOLDER_ARTIFACT },
+    }),
   }
 }
 
-export function buildFindFileRequest(token: string, name: string, folderId: string): DriveRequest {
+export function buildTagFolderRequest(token: string, folderId: string): DriveRequest {
+  return {
+    url: `${DRIVE_FILES_URL}/${encodeURIComponent(folderId)}`,
+    method: 'PATCH',
+    headers: authHeaders(token, { 'Content-Type': 'application/json' }),
+    body: JSON.stringify({
+      appProperties: { [DRIVE_ARTIFACT_PROPERTY]: DRIVE_FOLDER_ARTIFACT },
+    }),
+  }
+}
+
+export function buildFindFileRequest(
+  token: string,
+  name: string,
+  folderId: string,
+  pageToken?: string,
+): DriveRequest {
   const escapedName = escapeDriveQueryValue(name)
   const escapedFolderId = escapeDriveQueryValue(folderId)
-  const query = `name='${escapedName}' and '${escapedFolderId}' in parents and trashed=false`
-  return filesListRequest(token, query)
+  const query = `name='${escapedName}' and '${escapedFolderId}' in parents and mimeType!='${DRIVE_FOLDER_MIME}' and trashed=false`
+  return filesListRequest(token, query, pageToken)
+}
+
+export function buildFindManagedFileRequest(
+  token: string,
+  artifact: string,
+  folderId: string,
+  pageToken?: string,
+): DriveRequest {
+  const escapedFolderId = escapeDriveQueryValue(folderId)
+  const query = `${appPropertyQuery(artifact)} and '${escapedFolderId}' in parents and mimeType!='${DRIVE_FOLDER_MIME}' and trashed=false`
+  return filesListRequest(token, query, pageToken)
+}
+
+export function buildDownloadFileRequest(token: string, fileId: string): DriveRequest {
+  const params = new URLSearchParams({ alt: 'media' })
+  return {
+    url: `${DRIVE_FILES_URL}/${encodeURIComponent(fileId)}?${params.toString()}`,
+    method: 'GET',
+    headers: authHeaders(token),
+  }
 }
 
 /**
@@ -128,15 +194,19 @@ export function buildFindFileRequest(token: string, name: string, folderId: stri
  */
 export function buildCreateFileRequest(
   token: string,
-  opts: { name: string; folderId: string; content: string; boundary: string },
+  opts: { name: string; folderId: string; content: string; artifact: string; boundary: string },
 ): DriveRequest {
-  const metadata = JSON.stringify({ name: opts.name, parents: [opts.folderId] })
+  const metadata = JSON.stringify({
+    name: opts.name,
+    parents: [opts.folderId],
+    appProperties: { [DRIVE_ARTIFACT_PROPERTY]: opts.artifact },
+  })
   const body =
     `--${opts.boundary}\r\n` +
     `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
     `${metadata}\r\n` +
     `--${opts.boundary}\r\n` +
-    `Content-Type: ${MARKDOWN_MIME}\r\n\r\n` +
+    `Content-Type: ${DRIVE_MARKDOWN_MIME}\r\n\r\n` +
     `${opts.content}\r\n` +
     `--${opts.boundary}--`
 
@@ -151,25 +221,54 @@ export function buildCreateFileRequest(
 }
 
 /**
- * Media-only update (no metadata part) — this replaces the existing file's
- * content in place, so Drive's revision history becomes our version
- * history instead of us creating duplicate files per capture.
+ * Multipart update replaces content while atomically renaming and tagging the
+ * existing file, preserving Drive's revision history.
  */
 export function buildUpdateFileRequest(
   token: string,
   fileId: string,
-  content: string,
+  opts: { name: string; content: string; artifact: string; boundary: string },
 ): DriveRequest {
+  const metadata = JSON.stringify({
+    name: opts.name,
+    appProperties: { [DRIVE_ARTIFACT_PROPERTY]: opts.artifact },
+  })
+  const body =
+    `--${opts.boundary}\r\n` +
+    `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+    `${metadata}\r\n` +
+    `--${opts.boundary}\r\n` +
+    `Content-Type: ${DRIVE_MARKDOWN_MIME}\r\n\r\n` +
+    `${opts.content}\r\n` +
+    `--${opts.boundary}--`
   return {
-    url: `${DRIVE_UPLOAD_URL}/${fileId}?uploadType=media`,
+    url: `${DRIVE_UPLOAD_URL}/${encodeURIComponent(fileId)}?uploadType=multipart`,
     method: 'PATCH',
-    headers: authHeaders(token, { 'Content-Type': MARKDOWN_MIME }),
-    body: content,
+    headers: authHeaders(token, {
+      'Content-Type': `multipart/related; boundary=${opts.boundary}`,
+    }),
+    body,
   }
 }
 
-/** Filesystem-safe Drive doc filename for a source title: slug + '.md'. */
-export function docFileName(title: string): string {
+/** SHA-256 identity key, short enough for Drive's private property limit. */
+export async function sourceArtifactKey(sourceDocId: string): Promise<string> {
+  return `${SOURCE_ARTIFACT_PREFIX}${await sha256Base64Url(sourceDocId)}`
+}
+
+/** Filesystem-safe Drive doc filename. The digest is presentation, never identity. */
+export function docFileName(title: string, artifact: string): string {
+  const digest = artifact.slice(
+    SOURCE_ARTIFACT_PREFIX.length,
+    SOURCE_ARTIFACT_PREFIX.length + SHORT_DIGEST_LENGTH,
+  )
+  const suffix = `--${digest}.md`
+  const sanitized = sanitizeFilenameBase(title, MAX_FILENAME_LENGTH - suffix.length)
+  const base = sanitized.length > 0 ? sanitized : 'untitled'
+  return `${base}${suffix}`
+}
+
+export function legacyDocFileName(title: string): string {
   const sanitized = sanitizeFilenameBase(title, 100)
   const base = sanitized.length > 0 ? sanitized : 'untitled'
   return `${base}.md`

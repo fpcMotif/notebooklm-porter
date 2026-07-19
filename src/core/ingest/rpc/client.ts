@@ -15,10 +15,10 @@ import {
   RpcRefused,
 } from '../../fx/errors'
 import { DebugLog, Http, withHttpTimeout } from '../../fx/services'
+import type { NotebookMeta } from '../../notebooks/model'
 import type { NotebookSource } from '../sources/model'
 import {
   addTextSourceParams,
-  addUrlSourceParams,
   addYoutubeSourceParams,
   buildEnvelope,
   buildRpcUrl,
@@ -28,10 +28,12 @@ import {
   homeUrl,
   listNotebooksParams,
   parseBatchexecuteResponse,
+  parseCreateNotebookAck,
   parseNotebookList,
   parseNotebookSources,
   refreshSourceParams,
   RPC_IDS,
+  type CreateNotebookAck,
 } from './protocol'
 
 export interface NblmSession {
@@ -157,7 +159,7 @@ export function rpcCall(
         {
           url: redact(url),
           resultKind: 'placeholder-null',
-          responseHead: text.slice(0, 300),
+          responseBytes: text.length,
         },
         { elapsedMs },
       )
@@ -199,12 +201,21 @@ export function listNotebooks(
   session: NblmSession,
   authuser: number,
 ): Effect.Effect<
-  { id: string; title: string }[],
+  NotebookMeta[],
   FetchError | HttpStatusError | ProtocolDrift | RpcRefused,
   Http | DebugLog
 > {
   return rpcCall(RPC_IDS.listNotebooks, listNotebooksParams(), session, authuser, '/').pipe(
-    Effect.map(parseNotebookList),
+    Effect.flatMap((result) =>
+      Effect.try({
+        try: () => parseNotebookList(result),
+        catch: (cause) =>
+          new ProtocolDrift({
+            rpcId: RPC_IDS.listNotebooks,
+            snippet: cause instanceof Error ? cause.message : String(cause),
+          }),
+      }),
+    ),
   )
 }
 
@@ -213,13 +224,13 @@ export function createNotebook(
   session: NblmSession,
   authuser: number,
 ): Effect.Effect<
-  unknown,
+  CreateNotebookAck,
   FetchError | HttpStatusError | ProtocolDrift | RpcRefused,
   Http | DebugLog
 > {
   return rpcCall(RPC_IDS.createNotebook, createNotebookParams(title), session, authuser, '/', {
     retry: false,
-  })
+  }).pipe(Effect.map(parseCreateNotebookAck))
 }
 
 export function addYoutubeSource(
@@ -235,26 +246,6 @@ export function addYoutubeSource(
   return rpcCall(
     RPC_IDS.addSource,
     addYoutubeSourceParams(notebookId, url),
-    session,
-    authuser,
-    notebookSourcePath(notebookId),
-    { retry: false },
-  )
-}
-
-export function addUrlSource(
-  notebookId: string,
-  url: string,
-  session: NblmSession,
-  authuser: number,
-): Effect.Effect<
-  unknown,
-  FetchError | HttpStatusError | ProtocolDrift | RpcRefused,
-  Http | DebugLog
-> {
-  return rpcCall(
-    RPC_IDS.addSource,
-    addUrlSourceParams(notebookId, url),
     session,
     authuser,
     notebookSourcePath(notebookId),
@@ -288,6 +279,7 @@ export function listSources(
   notebookId: string,
   session: NblmSession,
   authuser: number,
+  opts: { retry?: boolean } = {},
 ): Effect.Effect<
   NotebookSource[],
   FetchError | HttpStatusError | ProtocolDrift | RpcRefused,
@@ -299,6 +291,7 @@ export function listSources(
     session,
     authuser,
     notebookSourcePath(notebookId),
+    opts,
   ).pipe(Effect.map(parseNotebookSources))
 }
 

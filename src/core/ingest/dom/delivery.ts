@@ -1,6 +1,7 @@
 import { Effect } from 'effect'
-import { DebugLog, DomTabs } from '../../fx/services'
+import { DebugLog } from '../../fx/services'
 import type { DomDeliveryRequest, DomDeliveryResult } from './contracts'
+import { DomTabs } from './driver'
 
 /**
  * The queue's single DOM seam. Tab lifecycle and content-script transport

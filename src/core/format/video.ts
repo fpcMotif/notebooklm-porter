@@ -1,20 +1,19 @@
 import type { Video } from '../model/types'
+import { CAPTURED_AT_KEY, frontmatterBlock } from './frontmatter'
 
 /** Renders the local/export representation of one URL-backed YouTube source. */
 export function videoToMarkdown(video: Video, capturedAt: string): string {
-  const frontmatter = [
-    '---',
-    'source: youtube',
-    `url: ${JSON.stringify(video.url)}`,
-    `title: ${JSON.stringify(video.title)}`,
-    `video_id: ${video.videoId}`,
-    `captured_at: ${capturedAt}`,
-    ...(video.channel !== undefined ? [`channel: ${JSON.stringify(video.channel)}`] : []),
-    ...(video.durationSeconds !== undefined ? [`duration_seconds: ${video.durationSeconds}`] : []),
-    '---',
-  ]
+  const fm = frontmatterBlock([
+    ['source', 'youtube'],
+    ['url', video.url],
+    ['title', video.title],
+    ['video_id', video.videoId],
+    [CAPTURED_AT_KEY, capturedAt],
+    ['channel', video.channel],
+    ['duration_seconds', video.durationSeconds],
+  ])
   return [
-    ...frontmatter,
+    ...fm,
     '',
     `# ${video.title}`,
     '',

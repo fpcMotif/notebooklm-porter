@@ -1,34 +1,82 @@
 import { assert, describe, it } from '@effect/vitest'
-import { Effect, Layer } from 'effect'
-import { Kv } from './fx/services'
+import { Effect } from 'effect'
+import { kvTest } from './fx/testing'
 import {
   DEFAULT_SETTINGS,
+  decodeSettingsPatch,
+  decodeStoredSettings,
   getSettings,
   notebookTargetPatch,
   resolveNotebookTarget,
   updateSettings,
 } from './settings'
 
-function makeKvLayer(initial: Record<string, unknown> = {}) {
-  const store = new Map<string, unknown>(Object.entries(initial))
-  return Layer.succeed(
-    Kv,
-    Kv.of({
-      get: <T>(key: string) => Effect.succeed(store.get(key) as T | undefined),
-      set: <T>(key: string, value: T) =>
-        Effect.sync(() => {
-          store.set(key, value)
-        }),
-    }),
-  )
-}
-
 describe('settings', () => {
+  it('strictly decodes complete settings patches into fresh values', () => {
+    const input = {
+      nblmAuthuser: 2,
+      accounts: [{ authuser: 2, email: 'two@example.com' }],
+      notebookTargets: { reddit: 'nb-reddit' },
+      driveClientId: '',
+    }
+
+    const patch = decodeSettingsPatch(input)
+
+    assert.deepStrictEqual(patch, input)
+    assert.notStrictEqual(patch?.accounts, input.accounts)
+    assert.notStrictEqual(patch?.notebookTargets, input.notebookTargets)
+  })
+
+  it('rejects malformed, unknown, and explicitly undefined patch fields', () => {
+    assert.isUndefined(decodeSettingsPatch([]))
+    assert.deepStrictEqual(decodeSettingsPatch({}), {})
+    assert.isUndefined(decodeSettingsPatch({ unknown: true }))
+    assert.isUndefined(decodeSettingsPatch({ nblmAuthuser: undefined }))
+    assert.isUndefined(decodeSettingsPatch({ nblmAuthuser: -1 }))
+    assert.isUndefined(decodeSettingsPatch({ accounts: [{ authuser: 0, email: '' }] }))
+    assert.isUndefined(decodeSettingsPatch({ notebookTargets: { unknown: 'nb-1' } }))
+    assert.isUndefined(decodeSettingsPatch({ notebookTargets: { reddit: '' } }))
+    assert.isUndefined(decodeSettingsPatch({ driveClientId: undefined }))
+  })
+
+  it('recovers valid persisted settings siblings and drops malformed values', () => {
+    const stored = decodeStoredSettings({
+      nblmAuthuser: -1,
+      accounts: [
+        { authuser: 1, email: 'one@example.com' },
+        { authuser: -1, email: 'bad@example.com' },
+        { authuser: 2, email: '   ' },
+        { authuser: 3, email: 'three@example.com', extra: true },
+      ],
+      notebookTargets: { reddit: 'nb-reddit', unknown: 'nb-unknown', youtube: '' },
+      driveClientId: 42,
+      unknown: true,
+    })
+
+    assert.deepStrictEqual(stored, {
+      nblmAuthuser: 0,
+      accounts: [
+        { authuser: 1, email: 'one@example.com' },
+        { authuser: 3, email: 'three@example.com' },
+      ],
+      notebookTargets: { reddit: 'nb-reddit' },
+    })
+  })
+
+  it('creates fresh default collections and rejects inherited patches', () => {
+    const first = decodeStoredSettings(undefined)
+    const second = decodeStoredSettings(undefined)
+
+    assert.notStrictEqual(first.accounts, second.accounts)
+    assert.notStrictEqual(first.notebookTargets, second.notebookTargets)
+    assert.isUndefined(decodeSettingsPatch(Object.create({ nblmAuthuser: 1 }) as unknown))
+  })
+
   it.effect('getSettings returns defaults when nothing is stored', () =>
     Effect.gen(function* () {
       const settings = yield* getSettings()
       assert.deepStrictEqual(settings, DEFAULT_SETTINGS)
-    }).pipe(Effect.provide(makeKvLayer())),
+    }).pipe(Effect.provide(kvTest())),
   )
 
   it.effect('updateSettings merges the patch into current settings and persists it', () =>
@@ -43,7 +91,7 @@ describe('settings', () => {
 
       const reread = yield* getSettings()
       assert.deepStrictEqual(reread, second)
-    }).pipe(Effect.provide(makeKvLayer())),
+    }).pipe(Effect.provide(kvTest())),
   )
 
   it('resolves only notebook IDs present in the freshly listed active account', () => {

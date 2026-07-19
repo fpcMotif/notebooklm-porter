@@ -4,47 +4,37 @@
  * exercisable through the real extension. `background.ts` is now just the
  * `runtime.onMessage` listener glue over `handlePorterMessage`.
  */
-import { Effect } from 'effect'
+import { Effect, Result } from 'effect'
 import { discoverAccounts } from './accounts/discover'
-import { adapterForUrl } from './adapters/registry'
-import { capturePlaylist } from './adapters/youtube/capture'
+import { accountBindingFor, sameAccountBinding, verifyNotebookTarget } from './accounts/ownership'
+import { captureSource, captureViaContentScript } from './adapters/capture'
+import { resolveCapturable } from './adapters/registry'
 import { backupDocsToDrive } from './backup/client'
-import { IpcError, NotLoggedIn, ProtocolDrift, type PorterError } from './fx/errors'
-import { Alarms, DebugLog, type Http, type Identity, type Kv, Tabs } from './fx/services'
+import type { PorterError } from './fx/errors'
+import { Alarms, DebugLog, type Http, type Identity, type Kv, type Tabs } from './fx/services'
 import { formatCapture } from './format/format'
 import { exportDocs } from './ingest/export'
+import { listSources } from './ingest/rpc/client'
 import {
-  createNotebook,
-  deleteSource,
-  fetchSession,
-  listNotebooks,
-  listSources,
-  refreshSource,
-  type NblmSession,
-} from './ingest/rpc/client'
-import { RPC_IDS } from './ingest/rpc/protocol'
-import { scanSources } from './ingest/sources/console'
-import { duplicateRemovalIds, findDuplicateGroups } from './ingest/sources/dedup'
+  removeSourceDuplicates,
+  retryNotebookSource,
+  scanSourceConsole,
+} from './ingest/sources/console'
+import { reconcileUnits } from './ingest/sources/reconcile'
 import { planIngestUnits } from './ingest/units'
+import { type PorterMessage, type PorterReply } from './messaging'
+import type { Capture } from './model/types'
 import {
-  isExtractResponse,
-  type ContentRequest,
-  type NotebookMeta,
-  type PorterMessage,
-  type PorterReply,
-} from './messaging'
-import type { SourceDoc } from './model/types'
-import { getSettings, notebookTargetPatch, updateSettings, type PorterSettings } from './settings'
-import { QUEUE_ALARM, enqueueUnits, queueSnapshot, retryJob, type QueueTarget } from './queue/queue'
+  createCatalogNotebook,
+  readNotebookCatalog,
+  refreshNotebookCatalog,
+} from './notebooks/catalog'
+import { getSettings, notebookTargetPatch, updateSettings } from './settings'
+import { QUEUE_ALARM, enqueueUnits, queueSnapshot, retryJob } from './queue/queue'
 import { loadQueue, saveQueue } from './queue/store'
-import { deleteDoc, listDocs, upsertDoc } from './store'
-import { diffAgainstLedger, loadLedger } from './store/ledger'
-import {
-  cacheNotebooks,
-  loadNotebookCache,
-  readCachedNotebooks,
-  saveNotebookCache,
-} from './store/notebooks-cache'
+import { deleteDoc, listDocs, storeCapturedDoc } from './store'
+import { loadLedger, partitionSynced, recordSynced, saveLedger } from './store/ledger'
+import { canWatchSource } from './watch/eligibility'
 import { armNextWatch } from './watch/resync'
 import { loadWatches, saveWatches } from './watch/store'
 import { removeWatch, removeWatchesForSourceDoc, upsertWatch, watchSnapshot } from './watch/watch'
@@ -57,210 +47,85 @@ type Handlers = {
   ) => Effect.Effect<PorterReply<K>, PorterError, PorterServices>
 }
 
-/**
- * Persists a freshly captured doc and records a content-free summary in the
- * debug ring — counts and kinds, never titles or bodies — so a copied log
- * shows what capture produced without leaking the captured text.
- */
-function storeCapturedDoc(doc: SourceDoc) {
-  return Effect.gen(function* () {
-    yield* upsertDoc(doc)
-    const debugLog = yield* DebugLog
-    yield* debugLog.log('capture', 'stored', {
-      docId: doc.id,
-      site: doc.site,
-      kind: doc.kind,
-      wordCount: doc.wordCount,
-      truncated: doc.truncated,
-      ...(doc.videoDocs !== undefined ? { videoTranscripts: doc.videoDocs.length } : {}),
-    })
-  })
-}
+export type StorageDomain = 'docs' | 'watches' | 'queue' | 'settings'
+
+/** Fixed global lane-acquisition order; multi-domain work always acquires in this order so the composition stays deadlock-free. */
+export const LANE_ORDER: readonly StorageDomain[] = ['docs', 'watches', 'queue', 'settings']
 
 /**
- * Shared by 'porter/capture-page' and 'porter/capture-url' (for
- * `contentScript: true` adapters, e.g. X): relay an extract request to the
- * tab's content script, then format + store whatever it reports.
+ * Storage consistency footprints used by background.ts for serialization.
+ * Mutators declare every written domain. Consistency-sensitive reads declare
+ * the lane whose committed state they must observe. Unrelated reads declare
+ * []. Exhaustive over PorterMessage: a new message needs an explicit policy.
  */
-function captureViaContentScript(tabId: number) {
+export const MESSAGE_DOMAINS: { [K in PorterMessage['type']]: readonly StorageDomain[] } = {
+  'porter/detect': [],
+  'porter/capture-url': ['docs'],
+  'porter/capture-page': ['docs'],
+  'porter/capture-result': ['docs'],
+  'porter/list-docs': [],
+  'porter/delete-doc': ['docs', 'watches'],
+  'porter/export': [],
+  'porter/queue-enqueue': ['queue', 'settings'],
+  'porter/queue-status': ['queue'],
+  'porter/queue-retry': ['queue'],
+  'porter/watch-create': ['watches'],
+  'porter/watch-list': ['watches'],
+  'porter/watch-remove': ['watches'],
+  // Writes the notebooks-cache (a read-modify-write on its own Kv key), but
+  // the cache is browse-only, so a lost cache update is harmless — runs unserialized.
+  'porter/list-notebooks': [],
+  'porter/create-notebook': [],
+  'porter/nblm-scan-console': [],
+  'porter/nblm-dedupe': [],
+  'porter/nblm-retry-source': [],
+  'porter/accounts-refresh': ['settings'],
+  'porter/get-settings': ['settings'],
+  'porter/update-settings': ['settings'],
+  // Remote Drive upload + local reads only; no local Kv key is mutated.
+  'porter/backup-drive': [],
+  'porter/debug-log': [],
+  'porter/debug-clear': [],
+}
+
+/** Domains for one message type, in LANE_ORDER, [] for unknown wire types. */
+export function domainsForMessage(type: string): readonly StorageDomain[] {
+  const entry = (MESSAGE_DOMAINS as Record<string, readonly StorageDomain[]>)[type]
+  if (entry === undefined) return []
+  return LANE_ORDER.filter((domain) => entry.includes(domain))
+}
+
+/** Formats and persists a fresh capture, then replies with the stored doc. */
+function storeAndReply(capture: Capture) {
   return Effect.gen(function* () {
-    const tabs = yield* Tabs
-    const response = yield* tabs.sendMessage(tabId, {
-      type: 'porter/extract-thread',
-    } satisfies ContentRequest)
-    if (!isExtractResponse(response)) {
-      return { ok: false as const, error: 'Malformed content-script response' }
-    }
-    if (!response.ok) {
-      return { ok: false as const, error: response.error }
-    }
-    const doc = formatCapture(response.capture)
+    const doc = formatCapture(capture)
     yield* storeCapturedDoc(doc)
     return { ok: true as const, docs: [doc] }
   })
 }
 
-/**
- * createNotebook's (CCqFvf) response shape is unverified live, so any id we
- * can pull from it is a hint only — probes the row shape listNotebooks uses
- * (title at [0], id at [2]) both flat and one level nested, mirroring how
- * parseNotebookList tolerates both live shapes.
- */
-function parseCreatedNotebookId(raw: unknown): string | undefined {
-  for (const candidate of [raw, Array.isArray(raw) ? raw[0] : undefined]) {
-    if (Array.isArray(candidate) && typeof candidate[2] === 'string') {
-      return candidate[2]
-    }
-  }
-  return undefined
-}
-
-/**
- * The freshly re-listed notebooks are the source of truth (design note):
- * only ids absent from the PRE-create list are candidates, so a stale hint
- * echoing a pre-existing notebook's id (or a same-titled pre-existing
- * notebook) can never be mistaken for the one we just created — among the
- * new ids, prefer the parsed-id match, then a title match, else the first.
- */
-function locateCreatedNotebook(
-  before: NotebookMeta[],
-  notebooks: NotebookMeta[],
-  title: string,
-  createResult: unknown,
-): NotebookMeta | undefined {
-  const priorIds = new Set(before.map((notebook) => notebook.id))
-  const newNotebooks = notebooks.filter((notebook) => !priorIds.has(notebook.id))
-  if (newNotebooks.length === 0) return undefined
-  const parsedId = parseCreatedNotebookId(createResult)
-  const byId =
-    parsedId !== undefined ? newNotebooks.find((notebook) => notebook.id === parsedId) : undefined
-  return byId ?? newNotebooks.find((notebook) => notebook.title === title) ?? newNotebooks[0]
-}
-
-/** Read-after-write lag budget for the post-create re-list (design note). */
-const CREATE_NOTEBOOK_RELIST_RETRIES = 2
-const CREATE_NOTEBOOK_RELIST_DELAY = '400 millis'
-
-/** Cache is browse-only and is written only after a fresh authenticated list succeeds. */
-function cacheFreshNotebooks(session: NblmSession, authuser: number, notebooks: NotebookMeta[]) {
-  const email = session.email
-  if (email === undefined) return Effect.void
-  return Effect.gen(function* () {
-    const cache = yield* loadNotebookCache()
-    yield* saveNotebookCache(
-      cacheNotebooks(cache, {
-        authuser,
-        email,
-        notebooks,
-        refreshedAt: new Date().toISOString(),
-      }),
-    )
-  })
-}
-
-/** Validates a requested notebook against the current authenticated account. */
-function verifyTargetNotebook(
-  notebookId: string,
-): Effect.Effect<
-  { settings: PorterSettings; target: QueueTarget },
-  PorterError,
-  Http | Kv | DebugLog
-> {
-  return Effect.gen(function* () {
-    const settings = yield* getSettings()
-    const account = settings.accounts.find(
-      (candidate) => candidate.authuser === settings.nblmAuthuser,
-    )
-    if (account === undefined)
-      return yield* Effect.fail(new NotLoggedIn({ authuser: settings.nblmAuthuser }))
-
-    const session = yield* fetchSession(settings.nblmAuthuser)
-    if (session.email === undefined || session.email !== account.email) {
-      return yield* Effect.fail(new NotLoggedIn({ authuser: settings.nblmAuthuser }))
-    }
-    const notebooks = yield* listNotebooks(session, settings.nblmAuthuser)
-    if (!notebooks.some((notebook) => notebook.id === notebookId)) {
-      return yield* Effect.fail(
-        new IpcError({ reason: 'Choose a notebook from the current account' }),
-      )
-    }
-    return {
-      settings,
-      target: {
-        notebookId,
-        authuser: settings.nblmAuthuser,
-        accountEmail: session.email,
-      },
-    }
-  })
-}
-
-/**
- * Resolves an authenticated NBLM session for the active account, asserting the
- * signed-in email matches the selected account (same guard as
- * `verifyTargetNotebook`, minus the notebook-existence round-trip — the console
- * only ever targets a notebook the popup already listed for this account).
- */
-function authenticatedNblm(): Effect.Effect<
-  { session: NblmSession; authuser: number },
-  PorterError,
-  Http | Kv | DebugLog
-> {
-  return Effect.gen(function* () {
-    const settings = yield* getSettings()
-    const account = settings.accounts.find(
-      (candidate) => candidate.authuser === settings.nblmAuthuser,
-    )
-    if (account === undefined) {
-      return yield* Effect.fail(new NotLoggedIn({ authuser: settings.nblmAuthuser }))
-    }
-    const session = yield* fetchSession(settings.nblmAuthuser)
-    if (session.email === undefined || session.email !== account.email) {
-      return yield* Effect.fail(new NotLoggedIn({ authuser: settings.nblmAuthuser }))
-    }
-    return { session, authuser: settings.nblmAuthuser }
-  })
-}
-
 const handlers: Handlers = {
   'porter/detect': (msg) => {
-    const adapter = adapterForUrl(msg.url)
-    const capturable = adapter?.detect(msg.url)
+    const capturable = resolveCapturable(msg.url)?.capturable
     return Effect.succeed({
       ok: true as const,
       ...(capturable ? { capturable: capturable.label } : {}),
-      ...(adapter?.id === 'youtube' && capturable?.kind === 'playlist'
-        ? { canEnrichYoutube: true as const }
-        : {}),
+      ...(capturable?.canEnrichTranscripts === true ? { canEnrichTranscripts: true as const } : {}),
     })
   },
   'porter/capture-url': (msg) => {
-    const adapter = adapterForUrl(msg.url)
-    if (adapter?.contentScript) {
-      return captureViaContentScript(msg.tabId)
-    }
-    const captureFromUrl = adapter?.captureFromUrl
-    if (!captureFromUrl) {
+    const resolved = resolveCapturable(msg.url)
+    if (resolved === undefined) {
       return Effect.succeed({ ok: false as const, error: 'Nothing capturable on this page' })
     }
-    return Effect.gen(function* () {
-      const capture = yield* msg.enrichYoutube === true &&
-      adapter.id === 'youtube' &&
-      adapter.detect(msg.url)?.kind === 'playlist'
-        ? capturePlaylist(msg.url, { enrichTranscripts: true })
-        : captureFromUrl(msg.url)
-      const doc = formatCapture(capture)
-      yield* storeCapturedDoc(doc)
-      return { ok: true as const, docs: [doc] }
-    })
+    return captureSource(resolved, {
+      tabId: msg.tabId,
+      ...(msg.options !== undefined ? { options: msg.options } : {}),
+    }).pipe(Effect.flatMap(storeAndReply))
   },
-  'porter/capture-page': (msg) => captureViaContentScript(msg.tabId),
-  'porter/capture-result': (msg) =>
-    Effect.gen(function* () {
-      const doc = formatCapture(msg.capture)
-      yield* storeCapturedDoc(doc)
-      return { ok: true as const, docs: [doc] }
-    }),
+  'porter/capture-page': (msg) =>
+    captureViaContentScript(msg.tabId).pipe(Effect.flatMap(storeAndReply)),
+  'porter/capture-result': (msg) => storeAndReply(msg.capture),
   'porter/list-docs': () =>
     Effect.gen(function* () {
       const docs = yield* listDocs()
@@ -282,7 +147,8 @@ const handlers: Handlers = {
     }),
   'porter/queue-enqueue': (msg) =>
     Effect.gen(function* () {
-      const { settings, target } = yield* verifyTargetNotebook(msg.notebookId)
+      const verified = yield* verifyNotebookTarget(msg.target)
+      const { target, account } = verified
       const docs = yield* listDocs()
       const requested = new Set(msg.docIds)
       const selectedDocs = docs.filter((doc) => requested.has(doc.id))
@@ -290,32 +156,66 @@ const handlers: Handlers = {
       // Skip units already receipted for this notebook so a re-ingest can't
       // create a second copy of an unchanged source. The logged breakdown also
       // exposes whether the ledger actually remembers a prior run.
-      const ledger = yield* loadLedger()
-      const diff = diffAgainstLedger(
-        ledger,
-        msg.notebookId,
-        units.map((unit) => ({ id: unit.id, contentHash: unit.contentHash })),
+      let ledger = yield* loadLedger()
+      const { pending: ledgerPending, synced, changed } = partitionSynced(ledger, target, units)
+      // Advisory only: drain enforces. A listing failure falls back to ledger-only.
+      let pendingUnits = ledgerPending
+      let alreadyOnServer = 0
+      const debugLog = yield* DebugLog
+      const sourcesResult = yield* Effect.result(
+        listSources(target.notebookId, account.session, account.authuser, { retry: false }),
       )
-      const alreadySynced = new Set(diff.unchanged)
-      const pendingUnits = units.filter((unit) => !alreadySynced.has(unit.id))
+      if (Result.isFailure(sourcesResult)) {
+        yield* debugLog.log(
+          'queue',
+          'enqueue advisory source listing failed',
+          { error: String(sourcesResult.failure) },
+          { level: 'warn' },
+        )
+      } else {
+        const { present, absent } = reconcileUnits(ledgerPending, sourcesResult.success)
+        if (present.length > 0) {
+          const now = new Date().toISOString()
+          ledger = recordSynced(
+            ledger,
+            target,
+            present.map(({ unit }) => ({
+              id: unit.id,
+              contentHash: unit.contentHash,
+              now,
+            })),
+          )
+          yield* saveLedger(ledger)
+          alreadyOnServer = present.length
+          pendingUnits = absent
+        }
+      }
       const queue = yield* loadQueue()
       const next = enqueueUnits(queue, target, pendingUnits, new Date().toISOString())
       yield* saveQueue(next)
-      const debugLog = yield* DebugLog
       yield* debugLog.log('queue', 'enqueue', {
-        notebookId: msg.notebookId,
+        notebookId: target.notebookId,
         requestedDocs: selectedDocs.length,
         plannedUnits: units.length,
-        alreadySynced: diff.unchanged.length,
-        changed: diff.changed.length,
+        alreadySynced: synced.length,
+        alreadyOnServer,
+        changed,
         enqueued: pendingUnits.length,
         pending: next.jobs.length,
       })
       const sites = Array.from(new Set(selectedDocs.map((doc) => doc.site)))
       if (sites.length > 0) {
-        yield* updateSettings({
-          notebookTargets: notebookTargetPatch(settings.notebookTargets, sites, msg.notebookId),
-        })
+        const settings = yield* getSettings()
+        const currentBinding = accountBindingFor(settings)
+        if (currentBinding !== undefined && sameAccountBinding(currentBinding, target)) {
+          yield* updateSettings({
+            notebookTargets: notebookTargetPatch(
+              settings.notebookTargets,
+              sites,
+              target.notebookId,
+            ),
+          })
+        }
       }
       const alarms = yield* Alarms
       yield* alarms.schedule(QUEUE_ALARM, Date.now())
@@ -338,26 +238,14 @@ const handlers: Handlers = {
     }),
   'porter/watch-create': (msg) =>
     Effect.gen(function* () {
-      const { target } = yield* verifyTargetNotebook(msg.notebookId)
+      const { target } = yield* verifyNotebookTarget(msg.target)
 
       const doc = (yield* listDocs()).find((candidate) => candidate.id === msg.docId)
       if (doc === undefined) {
-        return yield* Effect.fail(new IpcError({ reason: 'The captured source no longer exists' }))
+        return { ok: false as const, error: 'The captured source no longer exists' }
       }
-      const adapter = adapterForUrl(doc.canonicalUrl)
-      const supportedWatch =
-        (doc.site === 'youtube' && doc.kind === 'playlist' && adapter?.id === 'youtube') ||
-        (doc.site === 'reddit' && doc.kind === 'thread' && adapter?.id === 'reddit') ||
-        (doc.site === 'hackernews' && doc.kind === 'thread' && adapter?.id === 'hackernews')
-      if (
-        !supportedWatch ||
-        adapter.contentScript ||
-        adapter.captureFromUrl === undefined ||
-        adapter.detect(doc.canonicalUrl) === null
-      ) {
-        return yield* Effect.fail(
-          new IpcError({ reason: 'This source cannot be resynced in the background yet' }),
-        )
+      if (!canWatchSource(doc)) {
+        return { ok: false as const, error: 'This source cannot be resynced in the background yet' }
       }
 
       const watches = yield* loadWatches()
@@ -366,7 +254,7 @@ const handlers: Handlers = {
         sourceUrl: doc.canonicalUrl,
         target,
         ...(doc.videoDocs !== undefined && doc.videoDocs.length > 0
-          ? { enrichYoutube: true as const }
+          ? { captureOptions: { enrichTranscripts: true as const } }
           : {}),
         now: new Date().toISOString(),
       })
@@ -389,93 +277,30 @@ const handlers: Handlers = {
     }),
   'porter/list-notebooks': (msg) =>
     Effect.gen(function* () {
-      const settings = yield* getSettings()
-      const session = yield* fetchSession(settings.nblmAuthuser)
-      if (msg.forceRefresh !== true && session.email !== undefined) {
-        const cache = yield* loadNotebookCache()
-        const cached = readCachedNotebooks(cache, settings.nblmAuthuser, session.email)
-        if (cached !== undefined) return { ok: true as const, notebooks: cached }
-      }
-      const notebooks = yield* listNotebooks(session, settings.nblmAuthuser)
-      yield* cacheFreshNotebooks(session, settings.nblmAuthuser, notebooks)
+      const notebooks = yield* msg.forceRefresh === true
+        ? refreshNotebookCatalog(msg.account)
+        : readNotebookCatalog(msg.account)
       return { ok: true as const, notebooks }
     }),
   'porter/create-notebook': (msg) =>
     Effect.gen(function* () {
-      const settings = yield* getSettings()
-      const session = yield* fetchSession(settings.nblmAuthuser)
-      const before = yield* listNotebooks(session, settings.nblmAuthuser)
-      const createResult = yield* createNotebook(msg.title, session, settings.nblmAuthuser)
-
-      let notebooks = yield* listNotebooks(session, settings.nblmAuthuser)
-      let created = locateCreatedNotebook(before, notebooks, msg.title, createResult)
-      // Backend read-after-write lag: the re-list can still reflect the
-      // pre-create state for a beat, so give it a couple more tries before
-      // declaring drift (which would otherwise invite a duplicate create).
-      for (let attempt = 0; !created && attempt < CREATE_NOTEBOOK_RELIST_RETRIES; attempt++) {
-        yield* Effect.sleep(CREATE_NOTEBOOK_RELIST_DELAY)
-        notebooks = yield* listNotebooks(session, settings.nblmAuthuser)
-        created = locateCreatedNotebook(before, notebooks, msg.title, createResult)
-      }
-      if (!created) {
-        return yield* Effect.fail(
-          new ProtocolDrift({
-            rpcId: RPC_IDS.createNotebook,
-            snippet: `created notebook "${msg.title}" not found in the re-listed notebooks`,
-          }),
-        )
-      }
-      yield* cacheFreshNotebooks(session, settings.nblmAuthuser, notebooks)
-      return { ok: true as const, notebooks, created }
+      const result = yield* createCatalogNotebook(msg.account, msg.title)
+      return { ok: true as const, ...result }
     }),
   'porter/nblm-scan-console': (msg) =>
     Effect.gen(function* () {
-      const { session, authuser } = yield* authenticatedNblm()
-      const sources = yield* listSources(msg.notebookId, session, authuser)
-      const scan = scanSources(sources)
-      const debugLog = yield* DebugLog
-      yield* debugLog.log('console', 'scan', {
-        notebookId: msg.notebookId,
-        sources: sources.length,
-        duplicateGroups: scan.duplicateGroups.length,
-        duplicates: scan.duplicateCount,
-        failed: scan.failed.length,
-      })
+      const scan = yield* scanSourceConsole(msg.target)
       return { ok: true as const, scan }
     }),
   'porter/nblm-dedupe': (msg) =>
     Effect.gen(function* () {
-      const { session, authuser } = yield* authenticatedNblm()
-      const sources = yield* listSources(msg.notebookId, session, authuser)
-      const removalIds = duplicateRemovalIds(findDuplicateGroups(sources))
-      const debugLog = yield* DebugLog
-      yield* debugLog.log('console', 'dedupe', {
-        notebookId: msg.notebookId,
-        sources: sources.length,
-        removing: removalIds.length,
-      })
-      // Sequential + idempotent: DELETE_SOURCE succeeds even for an
-      // already-absent source, and the post-delete re-list is the source of
-      // truth, so a mid-batch failure surfaces without leaving a false count.
-      const removedIds: string[] = []
-      for (const sourceId of removalIds) {
-        yield* deleteSource(msg.notebookId, sourceId, session, authuser)
-        removedIds.push(sourceId)
-      }
-      const fresh = yield* listSources(msg.notebookId, session, authuser)
-      return { ok: true as const, scan: scanSources(fresh), removedIds }
+      const result = yield* removeSourceDuplicates(msg.target)
+      return { ok: true as const, ...result }
     }),
   'porter/nblm-retry-source': (msg) =>
     Effect.gen(function* () {
-      const { session, authuser } = yield* authenticatedNblm()
-      yield* refreshSource(msg.notebookId, msg.sourceId, session, authuser)
-      const debugLog = yield* DebugLog
-      yield* debugLog.log('console', 'retry', {
-        notebookId: msg.notebookId,
-        sourceId: msg.sourceId,
-      })
-      const fresh = yield* listSources(msg.notebookId, session, authuser)
-      return { ok: true as const, scan: scanSources(fresh) }
+      const scan = yield* retryNotebookSource(msg.target, msg.sourceId)
+      return { ok: true as const, scan }
     }),
   'porter/accounts-refresh': () =>
     Effect.gen(function* () {
@@ -566,6 +391,13 @@ function toFriendlyError<A, R>(
       AlarmError: (e) =>
         Effect.succeed({ ok: false as const, error: `Queue ${e.operation} failed` }),
       IpcError: (e) => Effect.succeed({ ok: false as const, error: e.reason }),
+      NotebookCreationUncertain: () =>
+        Effect.succeed({
+          ok: false as const,
+          error: 'Notebook creation may have succeeded. Refresh notebooks before retrying.',
+        }),
+      NotebookTitleInvalid: () =>
+        Effect.succeed({ ok: false as const, error: 'Enter a notebook title' }),
     }),
   )
 }

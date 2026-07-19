@@ -6,7 +6,23 @@
  * in the pipeline knows site-specific structure.
  */
 
-export type SiteId = 'youtube' | 'x' | 'reddit' | 'hackernews' | 'web'
+/** Closed source-site vocabulary, shared by static types and runtime decoders. */
+export const SITE_IDS = ['youtube', 'x', 'reddit', 'hackernews', 'web'] as const
+export type SiteId = (typeof SITE_IDS)[number]
+export const THREAD_SITE_IDS = ['x', 'reddit', 'hackernews'] as const
+export type ThreadSiteId = (typeof THREAD_SITE_IDS)[number]
+
+const SITE_ID_SET: ReadonlySet<string> = new Set(SITE_IDS)
+
+export function isSiteId(value: unknown): value is SiteId {
+  return typeof value === 'string' && SITE_ID_SET.has(value)
+}
+
+const THREAD_SITE_ID_SET: ReadonlySet<string> = new Set(THREAD_SITE_IDS)
+
+export function isThreadSiteId(value: unknown): value is ThreadSiteId {
+  return typeof value === 'string' && THREAD_SITE_ID_SET.has(value)
+}
 
 export interface Author {
   /** Display name as shown on the site ("Paul Graham"). */
@@ -46,7 +62,7 @@ export interface Post {
 }
 
 export interface Thread {
-  site: SiteId
+  site: ThreadSiteId
   /** Canonical permalink of the root post. */
   url: string
   title: string
@@ -142,7 +158,7 @@ export type Capture =
  * .md file) or exported. Rendered once at capture time and stored, so
  * ingest/export never needs the original Thread.
  */
-export interface SourceDoc {
+export interface SourceDocBase {
   /** Stable id: `${site}:${nativeId}` — used for dedup across re-captures. */
   id: string
   site: SiteId
@@ -153,8 +169,43 @@ export interface SourceDoc {
   markdown: string
   /** JSONL rendering (one JSON object per post/video per line); produced on demand for power users. */
   jsonl?: string
-  /** Successful playlist transcript snapshots. Missing videos use URL import. */
-  videoDocs?: TranscriptDocument[]
   wordCount: number
   truncated: boolean
 }
+
+export type PlaylistSourceDoc = SourceDocBase & {
+  kind: 'playlist'
+  site: 'youtube'
+  /** Capture-time inventory. Ingest reads only this typed snapshot. */
+  playlistVideos: VideoEntry[]
+  /** Successful playlist transcript snapshots. Missing videos use URL import. */
+  videoDocs?: TranscriptDocument[]
+}
+
+type NonPlaylistFields = {
+  playlistVideos?: never
+  videoDocs?: never
+}
+
+export type ThreadSourceDoc = SourceDocBase &
+  NonPlaylistFields & {
+    kind: 'thread'
+    site: ThreadSiteId
+  }
+
+export type VideoSourceDoc = SourceDocBase &
+  NonPlaylistFields & {
+    kind: 'video'
+    site: 'youtube'
+  }
+
+export type WebSourceDoc = SourceDocBase &
+  NonPlaylistFields & {
+    kind: 'web'
+    site: 'web'
+  }
+
+export type NonPlaylistSourceDoc = ThreadSourceDoc | VideoSourceDoc | WebSourceDoc
+
+/** Stored, NotebookLM-ready document. Playlist state is explicit and typed. */
+export type SourceDoc = PlaylistSourceDoc | ThreadSourceDoc | VideoSourceDoc | WebSourceDoc

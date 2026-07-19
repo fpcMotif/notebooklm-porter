@@ -1,35 +1,42 @@
 import { assert, describe, it } from '@effect/vitest'
 import { Effect, Layer, Result } from 'effect'
-import { HttpStatusError } from '../fx/errors'
+import { DriveApiError, DriveAuthError, HttpStatusError } from '../fx/errors'
 import type { HttpInit } from '../fx/services'
-import { DebugLog, Http, Identity, Kv } from '../fx/services'
+import { Http, Identity } from '../fx/services'
+import { debugLogTest, identityTest, kvTest } from '../fx/testing'
 import { backupDocsToDrive } from './client'
-import type { SourceDoc } from '../model/types'
+import type { SourceDoc, ThreadSourceDoc } from '../model/types'
 
-const NoopDebugLog = Layer.succeed(
-  DebugLog,
-  DebugLog.of({
-    log: () => Effect.void,
-    entries: () => Effect.succeed([]),
-    clear: () => Effect.void,
-  }),
-)
+const NoopDebugLog = debugLogTest()
 
-const AuthOk = Layer.succeed(
-  Identity,
-  Identity.of({
-    redirectUrl: () => 'https://abc.chromiumapp.org/',
-    launchAuthFlow: () =>
-      Effect.succeed('https://abc.chromiumapp.org/#access_token=token-1&expires_in=3599'),
-  }),
-)
+const AuthOk = identityTest('https://abc.chromiumapp.org/#access_token=token-1&expires_in=3599')
+const sourceId = (nativeId: string) => `reddit:${nativeId}`
 
-function makeDoc(overrides: Partial<SourceDoc> & Pick<SourceDoc, 'id'>): SourceDoc {
+function noAuthLayer(calls: { count: number }) {
+  return Layer.succeed(
+    Identity,
+    Identity.of({
+      redirectUrl: () => {
+        calls.count += 1
+        return 'https://test.chromiumapp.org/'
+      },
+      launchAuthFlow: () =>
+        Effect.sync(() => {
+          calls.count += 1
+          return 'https://test.chromiumapp.org/#access_token=unused&expires_in=3599'
+        }),
+    }),
+  )
+}
+
+function makeDoc(
+  overrides: Partial<ThreadSourceDoc> & Pick<ThreadSourceDoc, 'id'>,
+): ThreadSourceDoc {
   return {
     site: 'reddit',
     kind: 'thread',
     title: 'Some Title',
-    canonicalUrl: 'https://example.com',
+    canonicalUrl: 'https://www.reddit.com/r/porter/comments/test/',
     capturedAt: '2026-01-01T00:00:00.000Z',
     markdown: '# doc',
     wordCount: 1,
@@ -39,34 +46,52 @@ function makeDoc(overrides: Partial<SourceDoc> & Pick<SourceDoc, 'id'>): SourceD
 }
 
 function makeKvLayer(docs: SourceDoc[], driveClientId?: string) {
-  return Layer.succeed(
-    Kv,
-    Kv.of({
-      get: <T>(key: string) =>
-        Effect.succeed(
-          (key === 'porter/docs'
-            ? docs
-            : key === 'porter/settings'
-              ? { driveClientId }
-              : undefined) as T | undefined,
-        ),
-      set: () => Effect.void,
-    }),
-  )
+  return kvTest({
+    'porter/docs': docs,
+    'porter/settings': { driveClientId },
+  })
 }
 
 /** Drive's `files.list` query is a `q=` param; folder queries filter on `mimeType`. */
 function isFolderQuery(url: string): boolean {
-  return decodeURIComponent(url).includes('mimeType')
+  return decodeURIComponent(url).includes("mimeType='application/vnd.google-apps.folder'")
+}
+
+function listResponse(
+  files: { id: string; name: string; mimeType?: string; appProperties?: Record<string, string> }[],
+  extra: { nextPageToken?: string; incompleteSearch?: boolean } = {},
+): string {
+  return JSON.stringify({
+    files: files.map((file) => ({
+      id: file.id,
+      name: file.name,
+      mimeType: file.mimeType ?? 'text/markdown',
+      appProperties: file.appProperties ?? {},
+    })),
+    incompleteSearch: extra.incompleteSearch ?? false,
+    ...(extra.nextPageToken !== undefined ? { nextPageToken: extra.nextPageToken } : {}),
+  })
 }
 
 interface HttpFixture {
   /** Existing folder id, or undefined to force a create. */
   folderId?: string
-  /** Existing file id by (decoded) name, for the update-in-place path. */
-  fileIdByName?: Record<string, string>
   /** Names whose create/update PATCH/POST should fail (simulating a per-doc error). */
   failNames?: string[]
+  managedFiles?: {
+    id: string
+    name: string
+    mimeType?: string
+    appProperties?: Record<string, string>
+  }[]
+  legacyFilesByName?: Record<
+    string,
+    { id: string; name: string; mimeType?: string; appProperties?: Record<string, string> }[]
+  >
+  legacyContentById?: Record<string, string>
+  failUrlContains?: string
+  failMethod?: string
+  requests?: { url: string; method: string; body: string }[]
 }
 
 function makeHttpLayer(fixture: HttpFixture) {
@@ -77,23 +102,50 @@ function makeHttpLayer(fixture: HttpFixture) {
         Effect.gen(function* () {
           const method = init?.method ?? 'GET'
           const decoded = decodeURIComponent(url)
+          const body = init?.body ?? ''
+          fixture.requests?.push({ url: decoded, method, body })
 
           if (method === 'GET' && isFolderQuery(url)) {
             const files =
               fixture.folderId !== undefined
                 ? [{ id: fixture.folderId, name: 'NotebookLM Porter' }]
                 : []
-            return JSON.stringify({ files })
+            return listResponse(
+              files.map((file) => ({
+                id: file.id,
+                name: file.name,
+                mimeType: 'application/vnd.google-apps.folder',
+                appProperties: { notebookLmPorterArtifact: 'backup-folder:v1' },
+              })),
+            )
           }
 
           if (method === 'GET') {
-            const match = Object.entries(fixture.fileIdByName ?? {}).find(([name]) =>
+            if (decoded.includes("value='source:v1:")) {
+              return listResponse(fixture.managedFiles ?? [])
+            }
+            const downloadId = Object.keys(fixture.legacyContentById ?? {}).find((id) =>
+              decoded.includes(`/files/${id}?alt=media`),
+            )
+            if (downloadId !== undefined) {
+              return fixture.legacyContentById?.[downloadId] ?? ''
+            }
+            const legacyMatch = Object.entries(fixture.legacyFilesByName ?? {}).find(([name]) =>
               decoded.includes(name),
             )
-            return JSON.stringify({ files: match ? [{ id: match[1], name: match[0] }] : [] })
+            if (legacyMatch !== undefined) {
+              return listResponse(legacyMatch[1])
+            }
+            return listResponse([])
           }
 
-          const body = init?.body ?? ''
+          if (
+            fixture.failUrlContains !== undefined &&
+            decoded.includes(fixture.failUrlContains) &&
+            (fixture.failMethod === undefined || fixture.failMethod === method)
+          ) {
+            return yield* Effect.fail(new HttpStatusError({ url, status: 500 }))
+          }
           const shouldFail = (fixture.failNames ?? []).some((name) => body.includes(name))
           if (shouldFail) {
             return yield* Effect.fail(new HttpStatusError({ url, status: 500 }))
@@ -109,73 +161,204 @@ function makeHttpLayer(fixture: HttpFixture) {
   )
 }
 
+interface HttpRequest {
+  url: string
+  method: string
+  body: string
+}
+
+function makeScriptedHttpLayer(
+  handler: (request: HttpRequest) => Effect.Effect<string, HttpStatusError>,
+) {
+  return Layer.succeed(
+    Http,
+    Http.of({
+      text: (url, init) =>
+        handler({
+          url: decodeURIComponent(url),
+          method: init?.method ?? 'GET',
+          body: init?.body ?? '',
+        }),
+      json: () => Effect.die('unused in backup tests'),
+    }),
+  )
+}
+
+function isManagedFolderQuery(url: string): boolean {
+  return new URL(url).searchParams.get('q')?.includes("value='backup-folder:v1'") ?? false
+}
+
+function isManagedFileQuery(url: string): boolean {
+  return new URL(url).searchParams.get('q')?.includes("value='source:v1:") ?? false
+}
+
 describe('backupDocsToDrive', () => {
   it.effect('fails with DriveAuthError when no client id is configured', () =>
     Effect.gen(function* () {
-      const result = yield* Effect.result(backupDocsToDrive(['a']))
+      const result = yield* Effect.result(backupDocsToDrive([sourceId('a')]))
       assert.isTrue(Result.isFailure(result))
+      if (Result.isFailure(result)) {
+        assert.instanceOf(result.failure, DriveAuthError)
+        assert.strictEqual(result.failure.reason, 'missing-client-id')
+      }
     }).pipe(
-      Effect.provide(makeKvLayer([], undefined)),
+      Effect.provide(makeKvLayer([makeDoc({ id: sourceId('a') })], undefined)),
       Effect.provide(AuthOk),
       Effect.provide(makeHttpLayer({})),
       Effect.provide(NoopDebugLog),
     ),
   )
+
+  it.effect('keeps OAuth cancellation as DriveAuthError', () =>
+    Effect.gen(function* () {
+      const result = yield* Effect.result(backupDocsToDrive([sourceId('a')]))
+      assert.isTrue(Result.isFailure(result))
+      if (Result.isFailure(result)) {
+        assert.instanceOf(result.failure, DriveAuthError)
+        assert.strictEqual(result.failure.reason, 'cancelled')
+      }
+    }).pipe(
+      Effect.provide(makeKvLayer([makeDoc({ id: sourceId('a') })], 'client-1')),
+      Effect.provide(identityTest()),
+      Effect.provide(makeHttpLayer({})),
+      Effect.provide(NoopDebugLog),
+    ),
+  )
+
+  it.effect('preserves folder API failures without mutating documents', () => {
+    const requests: HttpRequest[] = []
+    return Effect.gen(function* () {
+      const result = yield* Effect.result(backupDocsToDrive([sourceId('a')]))
+      assert.isTrue(Result.isFailure(result))
+      if (Result.isFailure(result)) {
+        assert.instanceOf(result.failure, DriveApiError)
+        assert.strictEqual(result.failure.step, 'find-managed-folder')
+        assert.strictEqual(result.failure.status, 503)
+      }
+      assert.isFalse(requests.some((request) => request.method !== 'GET'))
+    }).pipe(
+      Effect.provide(makeKvLayer([makeDoc({ id: sourceId('a') })], 'client-1')),
+      Effect.provide(AuthOk),
+      Effect.provide(
+        makeScriptedHttpLayer((request) => {
+          requests.push(request)
+          return isManagedFolderQuery(request.url)
+            ? Effect.fail(new HttpStatusError({ url: request.url, status: 503 }))
+            : Effect.succeed(listResponse([]))
+        }),
+      ),
+      Effect.provide(NoopDebugLog),
+    )
+  })
 
   it.effect('reports "Doc not found" for an unknown docId without aborting the batch', () =>
     Effect.gen(function* () {
-      const outcomes = yield* backupDocsToDrive(['unknown', 'known'])
-      assert.deepStrictEqual(outcomes[0], { docId: 'unknown', ok: false, error: 'Doc not found' })
-      assert.strictEqual(outcomes[1]?.docId, 'known')
+      const outcomes = yield* backupDocsToDrive([sourceId('unknown'), sourceId('known')])
+      assert.deepStrictEqual(outcomes[0], {
+        docId: sourceId('unknown'),
+        ok: false,
+        error: 'Doc not found',
+      })
+      assert.strictEqual(outcomes[1]?.docId, sourceId('known'))
       assert.strictEqual(outcomes[1]?.ok, true)
     }).pipe(
-      Effect.provide(makeKvLayer([makeDoc({ id: 'known' })], 'client-1')),
+      Effect.provide(makeKvLayer([makeDoc({ id: sourceId('known') })], 'client-1')),
       Effect.provide(AuthOk),
       Effect.provide(makeHttpLayer({})),
       Effect.provide(NoopDebugLog),
     ),
   )
+
+  it.effect('returns stale-only selections without OAuth, HTTP, or Drive mutation', () => {
+    const requests: HttpRequest[] = []
+    const authCalls = { count: 0 }
+    return Effect.gen(function* () {
+      const outcomes = yield* backupDocsToDrive([sourceId('stale-a'), sourceId('stale-b')])
+      assert.deepStrictEqual(outcomes, [
+        { docId: sourceId('stale-a'), ok: false, error: 'Doc not found' },
+        { docId: sourceId('stale-b'), ok: false, error: 'Doc not found' },
+      ])
+      assert.strictEqual(authCalls.count, 0)
+      assert.deepStrictEqual(requests, [])
+    }).pipe(
+      Effect.provide(makeKvLayer([makeDoc({ id: sourceId('known') })], undefined)),
+      Effect.provide(noAuthLayer(authCalls)),
+      Effect.provide(makeHttpLayer({ requests })),
+      Effect.provide(NoopDebugLog),
+    )
+  })
+
+  it.effect('returns an empty selection without OAuth, HTTP, or Drive mutation', () => {
+    const requests: HttpRequest[] = []
+    const authCalls = { count: 0 }
+    return Effect.gen(function* () {
+      const outcomes = yield* backupDocsToDrive([])
+      assert.deepStrictEqual(outcomes, [])
+      assert.strictEqual(authCalls.count, 0)
+      assert.deepStrictEqual(requests, [])
+    }).pipe(
+      Effect.provide(makeKvLayer([], undefined)),
+      Effect.provide(noAuthLayer(authCalls)),
+      Effect.provide(makeHttpLayer({ requests })),
+      Effect.provide(NoopDebugLog),
+    )
+  })
 
   it.effect('creates the folder and file when neither exists yet', () =>
     Effect.gen(function* () {
-      const outcomes = yield* backupDocsToDrive(['a'])
-      assert.deepStrictEqual(outcomes, [{ docId: 'a', ok: true }])
+      const outcomes = yield* backupDocsToDrive([sourceId('a')])
+      assert.deepStrictEqual(outcomes, [{ docId: sourceId('a'), ok: true }])
     }).pipe(
-      Effect.provide(makeKvLayer([makeDoc({ id: 'a', title: 'Fresh Doc' })], 'client-1')),
+      Effect.provide(makeKvLayer([makeDoc({ id: sourceId('a'), title: 'Fresh Doc' })], 'client-1')),
       Effect.provide(AuthOk),
       Effect.provide(makeHttpLayer({})),
       Effect.provide(NoopDebugLog),
     ),
   )
 
-  it.effect('updates the file in place when one with the same name already exists', () =>
-    Effect.gen(function* () {
-      const outcomes = yield* backupDocsToDrive(['a'])
-      assert.deepStrictEqual(outcomes, [{ docId: 'a', ok: true }])
+  it.effect('updates one managed Drive id and never posts a second file', () => {
+    const requests: { url: string; method: string; body: string }[] = []
+    return Effect.gen(function* () {
+      const outcomes = yield* backupDocsToDrive([sourceId('a')])
+      assert.deepStrictEqual(outcomes, [{ docId: sourceId('a'), ok: true }])
+      assert.isTrue(
+        requests.some((request) => request.method === 'PATCH' && request.url.includes('file-1')),
+      )
+      assert.isFalse(
+        requests.some(
+          (request) => request.method === 'POST' && request.url.includes('uploadType=multipart'),
+        ),
+      )
     }).pipe(
-      Effect.provide(makeKvLayer([makeDoc({ id: 'a', title: 'Existing Doc' })], 'client-1')),
+      Effect.provide(
+        makeKvLayer([makeDoc({ id: sourceId('a'), title: 'Existing Doc' })], 'client-1'),
+      ),
       Effect.provide(AuthOk),
       Effect.provide(
         makeHttpLayer({
           folderId: 'folder-1',
-          fileIdByName: { 'Existing Doc.md': 'file-1' },
+          managedFiles: [{ id: 'file-1', name: 'Existing Doc--digest.md' }],
+          requests,
         }),
       ),
       Effect.provide(NoopDebugLog),
-    ),
-  )
+    )
+  })
 
   it.effect('isolates a per-doc failure: one bad upload does not abort the rest', () =>
     Effect.gen(function* () {
-      const outcomes = yield* backupDocsToDrive(['ok', 'bad'])
-      assert.strictEqual(outcomes[0]?.docId, 'ok')
+      const outcomes = yield* backupDocsToDrive([sourceId('ok'), sourceId('bad')])
+      assert.strictEqual(outcomes[0]?.docId, sourceId('ok'))
       assert.strictEqual(outcomes[0]?.ok, true)
-      assert.strictEqual(outcomes[1]?.docId, 'bad')
+      assert.strictEqual(outcomes[1]?.docId, sourceId('bad'))
       assert.strictEqual(outcomes[1]?.ok, false)
     }).pipe(
       Effect.provide(
         makeKvLayer(
-          [makeDoc({ id: 'ok', title: 'Good Doc' }), makeDoc({ id: 'bad', title: 'Bad Doc' })],
+          [
+            makeDoc({ id: sourceId('ok'), title: 'Good Doc' }),
+            makeDoc({ id: sourceId('bad'), title: 'Bad Doc' }),
+          ],
           'client-1',
         ),
       ),
@@ -184,4 +367,623 @@ describe('backupDocsToDrive', () => {
       Effect.provide(NoopDebugLog),
     ),
   )
+
+  it.effect('creates distinct managed artifacts for docs with the same title', () => {
+    const requests: { url: string; method: string; body: string }[] = []
+    return Effect.gen(function* () {
+      const outcomes = yield* backupDocsToDrive([sourceId('a'), sourceId('b')])
+      assert.deepStrictEqual(outcomes, [
+        { docId: sourceId('a'), ok: true },
+        { docId: sourceId('b'), ok: true },
+      ])
+      const uploads = requests.filter(
+        (request) => request.method === 'POST' && request.url.includes('uploadType=multipart'),
+      )
+      assert.strictEqual(uploads.length, 2)
+      assert.notStrictEqual(
+        uploads[0]?.body.match(/source:v1:[^"}]+/)?.[0],
+        uploads[1]?.body.match(/source:v1:[^"}]+/)?.[0],
+      )
+    }).pipe(
+      Effect.provide(
+        makeKvLayer(
+          [
+            makeDoc({ id: sourceId('a'), title: 'Same' }),
+            makeDoc({ id: sourceId('b'), title: 'Same' }),
+          ],
+          'client-1',
+        ),
+      ),
+      Effect.provide(AuthOk),
+      Effect.provide(makeHttpLayer({ folderId: 'folder-1', requests })),
+      Effect.provide(NoopDebugLog),
+    )
+  })
+
+  it.effect('updates the managed Drive id and renames when the title changes', () => {
+    const requests: { url: string; method: string; body: string }[] = []
+    return Effect.gen(function* () {
+      const outcomes = yield* backupDocsToDrive([sourceId('a')])
+      assert.deepStrictEqual(outcomes, [{ docId: sourceId('a'), ok: true }])
+      const update = requests.find(
+        (request) => request.method === 'PATCH' && request.url.includes('file-1'),
+      )
+      assert.isDefined(update)
+      assert.include(update?.body ?? '', 'Renamed--')
+    }).pipe(
+      Effect.provide(makeKvLayer([makeDoc({ id: sourceId('a'), title: 'Renamed' })], 'client-1')),
+      Effect.provide(AuthOk),
+      Effect.provide(
+        makeHttpLayer({
+          folderId: 'folder-1',
+          managedFiles: [{ id: 'file-1', name: 'Old--digest.md' }],
+          requests,
+        }),
+      ),
+      Effect.provide(NoopDebugLog),
+    )
+  })
+
+  it.effect('adopts exactly one byte-identical legacy file without creating another', () => {
+    const requests: { url: string; method: string; body: string }[] = []
+    return Effect.gen(function* () {
+      const outcomes = yield* backupDocsToDrive([sourceId('a')])
+      assert.deepStrictEqual(outcomes, [{ docId: sourceId('a'), ok: true }])
+      assert.isTrue(
+        requests.some((request) => request.method === 'PATCH' && request.url.includes('legacy-1')),
+      )
+      assert.isFalse(
+        requests.some(
+          (request) => request.method === 'POST' && request.url.includes('uploadType=multipart'),
+        ),
+      )
+    }).pipe(
+      Effect.provide(
+        makeKvLayer(
+          [makeDoc({ id: sourceId('a'), title: 'Legacy', markdown: '# doc' })],
+          'client-1',
+        ),
+      ),
+      Effect.provide(AuthOk),
+      Effect.provide(
+        makeHttpLayer({
+          folderId: 'folder-1',
+          legacyFilesByName: { 'Legacy.md': [{ id: 'legacy-1', name: 'Legacy.md' }] },
+          legacyContentById: { 'legacy-1': '# doc' },
+          requests,
+        }),
+      ),
+      Effect.provide(NoopDebugLog),
+    )
+  })
+
+  it.effect('leaves mismatched legacy bytes untouched and creates a managed artifact', () => {
+    const requests: { url: string; method: string; body: string }[] = []
+    return Effect.gen(function* () {
+      const outcomes = yield* backupDocsToDrive([sourceId('a')])
+      assert.deepStrictEqual(outcomes, [{ docId: sourceId('a'), ok: true }])
+      assert.isFalse(
+        requests.some((request) => request.method === 'PATCH' && request.url.includes('legacy-1')),
+      )
+      assert.isTrue(
+        requests.some(
+          (request) => request.method === 'POST' && request.url.includes('uploadType=multipart'),
+        ),
+      )
+    }).pipe(
+      Effect.provide(makeKvLayer([makeDoc({ id: sourceId('a'), title: 'Legacy' })], 'client-1')),
+      Effect.provide(AuthOk),
+      Effect.provide(
+        makeHttpLayer({
+          folderId: 'folder-1',
+          legacyFilesByName: { 'Legacy.md': [{ id: 'legacy-1', name: 'Legacy.md' }] },
+          legacyContentById: { 'legacy-1': 'old bytes' },
+          requests,
+        }),
+      ),
+      Effect.provide(NoopDebugLog),
+    )
+  })
+
+  it.effect('fails ambiguous managed matches without a mutation', () => {
+    const requests: { url: string; method: string; body: string }[] = []
+    return Effect.gen(function* () {
+      const outcomes = yield* backupDocsToDrive([sourceId('a')])
+      assert.strictEqual(outcomes[0]?.ok, false)
+      assert.isFalse(
+        requests.some((request) => request.method === 'PATCH' || request.method === 'POST'),
+      )
+    }).pipe(
+      Effect.provide(makeKvLayer([makeDoc({ id: sourceId('a') })], 'client-1')),
+      Effect.provide(AuthOk),
+      Effect.provide(
+        makeHttpLayer({
+          folderId: 'folder-1',
+          managedFiles: [
+            { id: 'file-1', name: 'one.md' },
+            { id: 'file-2', name: 'two.md' },
+          ],
+          requests,
+        }),
+      ),
+      Effect.provide(NoopDebugLog),
+    )
+  })
+
+  it.effect('does not create after a failed legacy adoption', () => {
+    const requests: { url: string; method: string; body: string }[] = []
+    return Effect.gen(function* () {
+      const outcomes = yield* backupDocsToDrive([sourceId('a')])
+      assert.strictEqual(outcomes[0]?.ok, false)
+      assert.isFalse(
+        requests.some(
+          (request) => request.method === 'POST' && request.url.includes('uploadType=multipart'),
+        ),
+      )
+    }).pipe(
+      Effect.provide(makeKvLayer([makeDoc({ id: sourceId('a'), title: 'Legacy' })], 'client-1')),
+      Effect.provide(AuthOk),
+      Effect.provide(
+        makeHttpLayer({
+          folderId: 'folder-1',
+          legacyFilesByName: { 'Legacy.md': [{ id: 'legacy-1', name: 'Legacy.md' }] },
+          legacyContentById: { 'legacy-1': '# doc' },
+          failUrlContains: 'legacy-1',
+          failMethod: 'PATCH',
+          requests,
+        }),
+      ),
+      Effect.provide(NoopDebugLog),
+    )
+  })
+
+  it.effect('ignores a same-name legacy file with a foreign private marker', () => {
+    const requests: HttpRequest[] = []
+    return Effect.gen(function* () {
+      const outcomes = yield* backupDocsToDrive([sourceId('a')])
+      assert.deepStrictEqual(outcomes, [{ docId: sourceId('a'), ok: true }])
+      assert.isFalse(
+        requests.some((request) => request.url.includes('legacy-1') && request.method === 'PATCH'),
+      )
+      assert.isTrue(
+        requests.some(
+          (request) => request.method === 'POST' && request.url.includes('uploadType=multipart'),
+        ),
+      )
+    }).pipe(
+      Effect.provide(makeKvLayer([makeDoc({ id: sourceId('a'), title: 'Legacy' })], 'client-1')),
+      Effect.provide(AuthOk),
+      Effect.provide(
+        makeHttpLayer({
+          folderId: 'folder-1',
+          legacyFilesByName: {
+            'Legacy.md': [
+              {
+                id: 'legacy-1',
+                name: 'Legacy.md',
+                appProperties: { notebookLmPorterArtifact: 'foreign' },
+              },
+            ],
+          },
+          requests,
+        }),
+      ),
+      Effect.provide(NoopDebugLog),
+    )
+  })
+
+  it.effect('ignores a same-name legacy file with the wrong MIME type', () => {
+    const requests: HttpRequest[] = []
+    return Effect.gen(function* () {
+      const outcomes = yield* backupDocsToDrive([sourceId('a')])
+      assert.deepStrictEqual(outcomes, [{ docId: sourceId('a'), ok: true }])
+      assert.isFalse(
+        requests.some((request) => request.url.includes('legacy-1') && request.method === 'PATCH'),
+      )
+      assert.isTrue(
+        requests.some(
+          (request) => request.method === 'POST' && request.url.includes('uploadType=multipart'),
+        ),
+      )
+    }).pipe(
+      Effect.provide(makeKvLayer([makeDoc({ id: sourceId('a'), title: 'Legacy' })], 'client-1')),
+      Effect.provide(AuthOk),
+      Effect.provide(
+        makeHttpLayer({
+          folderId: 'folder-1',
+          legacyFilesByName: {
+            'Legacy.md': [{ id: 'legacy-1', name: 'Legacy.md', mimeType: 'text/plain' }],
+          },
+          requests,
+        }),
+      ),
+      Effect.provide(NoopDebugLog),
+    )
+  })
+
+  it.effect('fails ambiguous eligible legacy artifacts without a mutation', () => {
+    const requests: HttpRequest[] = []
+    return Effect.gen(function* () {
+      const outcomes = yield* backupDocsToDrive([sourceId('a')])
+      assert.deepStrictEqual(outcomes, [
+        { docId: sourceId('a'), ok: false, error: 'ambiguous-legacy-file: 0' },
+      ])
+      assert.isFalse(
+        requests.some((request) => request.method === 'PATCH' || request.method === 'POST'),
+      )
+    }).pipe(
+      Effect.provide(makeKvLayer([makeDoc({ id: sourceId('a'), title: 'Legacy' })], 'client-1')),
+      Effect.provide(AuthOk),
+      Effect.provide(
+        makeHttpLayer({
+          folderId: 'folder-1',
+          legacyFilesByName: {
+            'Legacy.md': [
+              { id: 'one', name: 'Legacy.md' },
+              { id: 'two', name: 'Legacy.md' },
+            ],
+          },
+          requests,
+        }),
+      ),
+      Effect.provide(NoopDebugLog),
+    )
+  })
+
+  it.effect('isolates malformed Drive JSON and shapes from later docs', () => {
+    const requests: HttpRequest[] = []
+    let managedLists = 0
+    return Effect.gen(function* () {
+      const outcomes = yield* backupDocsToDrive([
+        sourceId('bad-json'),
+        sourceId('bad-shape'),
+        sourceId('good'),
+      ])
+      assert.deepStrictEqual(outcomes[0], {
+        docId: sourceId('bad-json'),
+        ok: false,
+        error: 'find-managed-file: 0',
+      })
+      assert.deepStrictEqual(outcomes[1], {
+        docId: sourceId('bad-shape'),
+        ok: false,
+        error: 'find-managed-file: 0',
+      })
+      assert.deepStrictEqual(outcomes[2], { docId: sourceId('good'), ok: true })
+      assert.isTrue(
+        requests.some(
+          (request) => request.method === 'POST' && request.url.includes('uploadType=multipart'),
+        ),
+      )
+    }).pipe(
+      Effect.provide(
+        makeKvLayer(
+          [
+            makeDoc({ id: sourceId('bad-json') }),
+            makeDoc({ id: sourceId('bad-shape') }),
+            makeDoc({ id: sourceId('good') }),
+          ],
+          'client-1',
+        ),
+      ),
+      Effect.provide(AuthOk),
+      Effect.provide(
+        makeScriptedHttpLayer((request) => {
+          requests.push(request)
+          if (isManagedFolderQuery(request.url))
+            return Effect.succeed(
+              listResponse([
+                {
+                  id: 'folder-1',
+                  name: 'NotebookLM Porter',
+                  mimeType: 'application/vnd.google-apps.folder',
+                },
+              ]),
+            )
+          if (request.url.includes('source:v1:')) {
+            managedLists += 1
+            if (managedLists === 1) return Effect.succeed('{')
+            if (managedLists === 2) return Effect.succeed(JSON.stringify({ files: [{}] }))
+            return Effect.succeed(listResponse([]))
+          }
+          if (request.method === 'GET') return Effect.succeed(listResponse([]))
+          return Effect.succeed(JSON.stringify({ id: 'new-file-id' }))
+        }),
+      ),
+      Effect.provide(NoopDebugLog),
+    )
+  })
+
+  it.effect('accepts Drive list defaults when optional fields are absent', () =>
+    Effect.gen(function* () {
+      const outcomes = yield* backupDocsToDrive([sourceId('a')])
+      assert.deepStrictEqual(outcomes, [{ docId: sourceId('a'), ok: true }])
+    }).pipe(
+      Effect.provide(makeKvLayer([makeDoc({ id: sourceId('a') })], 'client-1')),
+      Effect.provide(AuthOk),
+      Effect.provide(
+        makeScriptedHttpLayer((request) => {
+          if (isManagedFolderQuery(request.url)) {
+            return Effect.succeed(
+              JSON.stringify({
+                files: [
+                  {
+                    id: 'folder-1',
+                    name: 'NotebookLM Porter',
+                    mimeType: 'application/vnd.google-apps.folder',
+                  },
+                ],
+              }),
+            )
+          }
+          if (isManagedFileQuery(request.url)) return Effect.succeed(JSON.stringify({ files: [] }))
+          if (request.method === 'GET') return Effect.succeed(JSON.stringify({}))
+          return Effect.succeed(JSON.stringify({ id: 'new-file-id' }))
+        }),
+      ),
+      Effect.provide(NoopDebugLog),
+    ),
+  )
+
+  it.effect('finds paginated duplicate managed artifacts before mutating', () => {
+    const requests: HttpRequest[] = []
+    return Effect.gen(function* () {
+      const outcomes = yield* backupDocsToDrive([sourceId('a')])
+      assert.deepStrictEqual(outcomes, [
+        { docId: sourceId('a'), ok: false, error: 'ambiguous-managed-file: 0' },
+      ])
+      assert.isFalse(
+        requests.some((request) => request.method === 'PATCH' || request.method === 'POST'),
+      )
+    }).pipe(
+      Effect.provide(makeKvLayer([makeDoc({ id: sourceId('a') })], 'client-1')),
+      Effect.provide(AuthOk),
+      Effect.provide(
+        makeScriptedHttpLayer((request) => {
+          requests.push(request)
+          if (isManagedFolderQuery(request.url))
+            return Effect.succeed(
+              listResponse([
+                {
+                  id: 'folder-1',
+                  name: 'NotebookLM Porter',
+                  mimeType: 'application/vnd.google-apps.folder',
+                },
+              ]),
+            )
+          if (isManagedFileQuery(request.url))
+            return Effect.succeed(
+              request.url.includes('pageToken=p2')
+                ? listResponse([{ id: 'two', name: 'two.md' }])
+                : listResponse([{ id: 'one', name: 'one.md' }], { nextPageToken: 'p2' }),
+            )
+          return Effect.succeed(listResponse([]))
+        }),
+      ),
+      Effect.provide(NoopDebugLog),
+    )
+  })
+
+  it.effect('fails a pagination token cycle, then releases the permit for the next backup', () => {
+    let backups = 0
+    let creates = 0
+    return Effect.gen(function* () {
+      const first = yield* backupDocsToDrive([sourceId('a')])
+      const second = yield* backupDocsToDrive([sourceId('a')])
+      assert.deepStrictEqual(first, [
+        { docId: sourceId('a'), ok: false, error: 'find-managed-file: 0' },
+      ])
+      assert.deepStrictEqual(second, [{ docId: sourceId('a'), ok: true }])
+      assert.strictEqual(creates, 1)
+    }).pipe(
+      Effect.provide(makeKvLayer([makeDoc({ id: sourceId('a') })], 'client-1')),
+      Effect.provide(AuthOk),
+      Effect.provide(
+        makeScriptedHttpLayer((request) => {
+          if (isManagedFolderQuery(request.url)) {
+            backups += 1
+            return Effect.succeed(
+              listResponse([
+                {
+                  id: 'folder-1',
+                  name: 'NotebookLM Porter',
+                  mimeType: 'application/vnd.google-apps.folder',
+                },
+              ]),
+            )
+          }
+          if (isManagedFileQuery(request.url) && backups === 1) {
+            return Effect.succeed(listResponse([], { nextPageToken: 'again' }))
+          }
+          if (request.method === 'GET') return Effect.succeed(listResponse([]))
+          if (request.method === 'POST') creates += 1
+          return Effect.succeed(JSON.stringify({ id: 'new-file-id' }))
+        }),
+      ),
+      Effect.provide(NoopDebugLog),
+    )
+  })
+
+  it.effect('never retags a foreign-marked legacy folder', () => {
+    const requests: HttpRequest[] = []
+    return Effect.gen(function* () {
+      const outcomes = yield* backupDocsToDrive([sourceId('a')])
+      assert.deepStrictEqual(outcomes, [{ docId: sourceId('a'), ok: true }])
+      assert.isFalse(
+        requests.some(
+          (request) => request.method === 'PATCH' && request.url.includes('foreign-folder'),
+        ),
+      )
+      assert.isTrue(
+        requests.some(
+          (request) =>
+            request.method === 'POST' && request.url.endsWith('/drive/v3/files?fields=id'),
+        ),
+      )
+    }).pipe(
+      Effect.provide(makeKvLayer([makeDoc({ id: sourceId('a') })], 'client-1')),
+      Effect.provide(AuthOk),
+      Effect.provide(
+        makeScriptedHttpLayer((request) => {
+          requests.push(request)
+          if (isManagedFolderQuery(request.url)) return Effect.succeed(listResponse([]))
+          if (isFolderQuery(request.url))
+            return Effect.succeed(
+              listResponse([
+                {
+                  id: 'foreign-folder',
+                  name: 'NotebookLM Porter',
+                  mimeType: 'application/vnd.google-apps.folder',
+                  appProperties: { notebookLmPorterArtifact: 'foreign' },
+                },
+              ]),
+            )
+          if (request.method === 'GET') return Effect.succeed(listResponse([]))
+          return Effect.succeed(JSON.stringify({ id: 'new-folder-or-file' }))
+        }),
+      ),
+      Effect.provide(NoopDebugLog),
+    )
+  })
+
+  it.effect('tags one unowned legacy folder before using it', () => {
+    const requests: HttpRequest[] = []
+    return Effect.gen(function* () {
+      const outcomes = yield* backupDocsToDrive([sourceId('a')])
+      assert.deepStrictEqual(outcomes, [{ docId: sourceId('a'), ok: true }])
+      assert.isTrue(
+        requests.some(
+          (request) => request.method === 'PATCH' && request.url.includes('legacy-folder'),
+        ),
+      )
+    }).pipe(
+      Effect.provide(makeKvLayer([makeDoc({ id: sourceId('a') })], 'client-1')),
+      Effect.provide(AuthOk),
+      Effect.provide(
+        makeScriptedHttpLayer((request) => {
+          requests.push(request)
+          if (isManagedFolderQuery(request.url)) return Effect.succeed(listResponse([]))
+          if (isFolderQuery(request.url))
+            return Effect.succeed(
+              listResponse([
+                {
+                  id: 'legacy-folder',
+                  name: 'NotebookLM Porter',
+                  mimeType: 'application/vnd.google-apps.folder',
+                },
+              ]),
+            )
+          if (request.method === 'GET') return Effect.succeed(listResponse([]))
+          return Effect.succeed(JSON.stringify({ id: 'new-file-id' }))
+        }),
+      ),
+      Effect.provide(NoopDebugLog),
+    )
+  })
+
+  it('serializes concurrent backups into one create then one update', async () => {
+    const requests: HttpRequest[] = []
+    let created = false
+    let startUpload!: () => void
+    let releaseUpload!: () => void
+    const uploadStarted = new Promise<void>((resolve) => {
+      startUpload = resolve
+    })
+    const release = new Promise<void>((resolve) => {
+      releaseUpload = resolve
+    })
+    const layer = Layer.mergeAll(
+      makeKvLayer([makeDoc({ id: sourceId('a') })], 'client-1'),
+      AuthOk,
+      makeScriptedHttpLayer((request) => {
+        requests.push(request)
+        if (isManagedFolderQuery(request.url))
+          return Effect.succeed(
+            listResponse([
+              {
+                id: 'folder-1',
+                name: 'NotebookLM Porter',
+                mimeType: 'application/vnd.google-apps.folder',
+              },
+            ]),
+          )
+        if (isManagedFileQuery(request.url))
+          return Effect.succeed(listResponse(created ? [{ id: 'file-1', name: 'old.md' }] : []))
+        if (request.method === 'GET') return Effect.succeed(listResponse([]))
+        if (request.method === 'POST' && request.url.includes('uploadType=multipart')) {
+          startUpload()
+          return Effect.promise(async () => {
+            await release
+            created = true
+            return JSON.stringify({ id: 'file-1' })
+          })
+        }
+        return Effect.succeed(JSON.stringify({ id: 'file-1' }))
+      }),
+      NoopDebugLog,
+    )
+    const first = Effect.runPromise(backupDocsToDrive([sourceId('a')]).pipe(Effect.provide(layer)))
+    await uploadStarted
+    const second = Effect.runPromise(backupDocsToDrive([sourceId('a')]).pipe(Effect.provide(layer)))
+    await Promise.resolve()
+    await Promise.resolve()
+    assert.strictEqual(requests.filter((request) => isManagedFolderQuery(request.url)).length, 1)
+    releaseUpload()
+    const outcomes = await Promise.all([first, second])
+    assert.deepStrictEqual(outcomes, [
+      [{ docId: sourceId('a'), ok: true }],
+      [{ docId: sourceId('a'), ok: true }],
+    ])
+    assert.strictEqual(
+      requests.filter(
+        (request) => request.method === 'POST' && request.url.includes('uploadType=multipart'),
+      ).length,
+      1,
+    )
+    assert.strictEqual(
+      requests.filter((request) => request.method === 'PATCH' && request.url.includes('file-1'))
+        .length,
+      1,
+    )
+  })
+
+  it.effect('keeps sanitized, blank, and truncated title collisions as separate artifacts', () => {
+    const requests: HttpRequest[] = []
+    const long = 'x'.repeat(300)
+    return Effect.gen(function* () {
+      const outcomes = yield* backupDocsToDrive([
+        sourceId('slash'),
+        sourceId('backslash'),
+        sourceId('blank'),
+        sourceId('space'),
+        sourceId('long-a'),
+        sourceId('long-b'),
+      ])
+      assert.isTrue(outcomes.every((outcome) => outcome.ok))
+      const names = requests
+        .filter(
+          (request) => request.method === 'POST' && request.url.includes('uploadType=multipart'),
+        )
+        .map((request) => request.body.match(/"name":"([^"]+)"/)?.[1])
+      assert.strictEqual(new Set(names).size, 6)
+      assert.isTrue(names.every((name) => name !== undefined && name.length <= 100))
+    }).pipe(
+      Effect.provide(
+        makeKvLayer(
+          [
+            makeDoc({ id: sourceId('slash'), title: 'a/b' }),
+            makeDoc({ id: sourceId('backslash'), title: 'a\\b' }),
+            makeDoc({ id: sourceId('blank'), title: '' }),
+            makeDoc({ id: sourceId('space'), title: '   ' }),
+            makeDoc({ id: sourceId('long-a'), title: long }),
+            makeDoc({ id: sourceId('long-b'), title: long }),
+          ],
+          'client-1',
+        ),
+      ),
+      Effect.provide(AuthOk),
+      Effect.provide(makeHttpLayer({ folderId: 'folder-1', requests })),
+      Effect.provide(NoopDebugLog),
+    )
+  })
 })

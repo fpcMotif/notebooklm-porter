@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Capture, Playlist, Post, Thread, Video } from '../model/types'
-import { formatCapture } from './format'
+import { countBodyWords, formatCapture } from './format'
 
 const FIXED_NOW = () => '2026-07-06T12:00:00.000Z'
 
@@ -211,6 +211,20 @@ describe('formatCapture — playlist', () => {
     expect(JSON.parse(lines[1] ?? '{}')).toMatchObject({ videoId: 'v2', index: 2 })
   })
 
+  it('stores an independent typed playlist inventory', () => {
+    const videos = [
+      { videoId: 'v1', url: 'https://www.youtube.com/watch?v=v1', title: 'One', index: 1 },
+    ]
+    const doc = formatCapture(playlistCapture({ videos }), undefined, FIXED_NOW)
+
+    if (doc.kind !== 'playlist') throw new Error('expected playlist')
+    expect(doc.playlistVideos).toEqual(videos)
+    expect(doc.playlistVideos).not.toBe(videos)
+    expect(doc.playlistVideos[0]).not.toBe(videos[0])
+    videos[0]!.title = 'Mutated after capture'
+    expect(doc.playlistVideos[0]?.title).toBe('One')
+  })
+
   it('markdown contains the ToC table (not per-video sources)', () => {
     const doc = formatCapture(playlistCapture(), undefined, FIXED_NOW)
     expect(doc.markdown).toContain('| # | Title | Channel | Duration | Captions |')
@@ -229,6 +243,10 @@ describe('formatCapture — playlist', () => {
     const doc = formatCapture(playlistCapture({ transcriptDocs }), undefined, FIXED_NOW)
 
     expect(doc.videoDocs).toEqual(transcriptDocs)
+    expect(doc.videoDocs).not.toBe(transcriptDocs)
+    expect(doc.videoDocs?.[0]).not.toBe(transcriptDocs[0])
+    transcriptDocs[0]!.markdown = 'Mutated after capture'
+    expect(doc.videoDocs?.[0]?.markdown).toBe('# Video one\n\nTranscript')
     expect(doc.markdown).toContain('| 1 | Video one |')
   })
 
@@ -291,5 +309,55 @@ describe('formatCapture — default clock', () => {
     const parsed = new Date(doc.capturedAt).getTime()
     expect(parsed).toBeGreaterThanOrEqual(before)
     expect(parsed).toBeLessThanOrEqual(after)
+  })
+})
+
+// Characterisation: values below were computed by running countBodyWords
+// against the pre-refactor implementation (frontmatter-scan logic inlined in
+// format.ts, before it moved to the shared frontmatter.ts module). These
+// pin today's exact scan semantics so the frontmatter.ts extraction can't
+// silently change word counts.
+describe('countBodyWords — frozen pre-refactor characterisation', () => {
+  it('excludes a terminated leading frontmatter block from the count', () => {
+    const markdown = `---
+source: web
+url: https://example.com
+captured_at: 2026-07-11T00:00:00.000Z
+---
+
+# Title
+
+Body text here.`
+    expect(countBodyWords(markdown)).toBe(5)
+  })
+
+  it('counts the whole document when there is no leading frontmatter', () => {
+    const markdown = `# Just a body
+
+No frontmatter at all.`
+    expect(countBodyWords(markdown)).toBe(8)
+  })
+
+  it('excludes frontmatter that omits captured_at the same as frontmatter that has it', () => {
+    const markdown = `---
+source: web
+url: https://example.com
+---
+
+# Title
+
+Body text here.`
+    expect(countBodyWords(markdown)).toBe(5)
+  })
+
+  it('falls back to counting the whole document when frontmatter is unterminated', () => {
+    const markdown = `---
+source: web
+url: https://example.com
+
+# Title
+
+Body text here.`
+    expect(countBodyWords(markdown)).toBe(10)
   })
 })

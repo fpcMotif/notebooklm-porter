@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
   addTextSourceParams,
-  addUrlSourceParams,
   addYoutubeSourceParams,
   buildEnvelope,
   buildRpcUrl,
@@ -11,6 +10,7 @@ import {
   homeUrl,
   listNotebooksParams,
   parseBatchexecuteResponse,
+  parseCreateNotebookAck,
   parseNotebookList,
   parseNotebookSources,
   refreshSourceParams,
@@ -179,14 +179,6 @@ describe('params builders', () => {
     expect(createNotebookParams('My Notebook')).toEqual(['My Notebook', null, null, TEMPLATE_BLOCK])
   })
 
-  it('addUrlSourceParams matches the website-URL spec variant verbatim', () => {
-    expect(addUrlSourceParams('nb-1', 'https://example.com/article')).toEqual([
-      [[null, null, ['https://example.com/article'], null, null, null, null, null, null, null, 1]],
-      'nb-1',
-      TEMPLATE_BLOCK,
-    ])
-  })
-
   it('addYoutubeSourceParams places the url at spec index 7 verbatim', () => {
     expect(addYoutubeSourceParams('nb-1', 'https://www.youtube.com/watch?v=abc123')).toEqual([
       [
@@ -296,6 +288,27 @@ describe('parseBatchexecuteResponse', () => {
     expect(() => parseBatchexecuteResponse(text, RPC_IDS.addSource)).toThrow(/^rpc-error:/)
   })
 
+  it('replaces hostile RPC error payloads with a bounded safe code', () => {
+    const secret = 'Private notebook title'
+    const text = `)]}'\n${chunk([['er', RPC_IDS.createNotebook, { secret }]])}\n`
+    let message = ''
+    try {
+      parseBatchexecuteResponse(text, RPC_IDS.createNotebook)
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error)
+    }
+    expect(message).toBe('rpc-error: UNKNOWN')
+    expect(message).not.toContain(secret)
+  })
+
+  it('does not mistake a private scalar string for an RPC code', () => {
+    const secret = 'Private-notebook-title'
+    const text = `)]}'\n${chunk([['er', RPC_IDS.createNotebook, secret]])}\n`
+    expect(() => parseBatchexecuteResponse(text, RPC_IDS.createNotebook)).toThrow(
+      'rpc-error: UNKNOWN',
+    )
+  })
+
   it('throws a protocol-drift error when no wrb.fr line matches the rpcId', () => {
     const text = `)]}'\n${chunk([['wrb.fr', 'unrelatedRpc', JSON.stringify({})]])}\n`
 
@@ -344,20 +357,38 @@ describe('parseNotebookList', () => {
     ])
   })
 
-  it('skips malformed rows (missing title or id) rather than throwing', () => {
+  it('fails closed when any row is malformed', () => {
     const result = [
       ['Good', null, 'nb-1'],
       ['Missing id', null, null],
-      [null, null, 'nb-3'],
-      'not-a-row',
-      null,
     ]
-    expect(parseNotebookList(result)).toEqual([{ id: 'nb-1', title: 'Good' }])
+    expect(() => parseNotebookList(result)).toThrow(/^protocol-drift:/)
   })
 
-  it('returns an empty array for a non-array result', () => {
-    expect(parseNotebookList(null)).toEqual([])
-    expect(parseNotebookList(undefined)).toEqual([])
-    expect(parseNotebookList('garbage')).toEqual([])
+  it('accepts only the verified direct and nested empty shapes', () => {
+    expect(parseNotebookList([])).toEqual([])
+    expect(parseNotebookList([[]])).toEqual([])
+    expect(parseNotebookList([[], null])).toEqual([])
+    expect(() => parseNotebookList([[], 'unexpected'])).toThrow(/^protocol-drift:/)
+  })
+
+  it('rejects unknown containers instead of collapsing drift to empty', () => {
+    expect(() => parseNotebookList(null)).toThrow(/^protocol-drift:/)
+    expect(() => parseNotebookList(undefined)).toThrow(/^protocol-drift:/)
+    expect(() => parseNotebookList('garbage')).toThrow(/^protocol-drift:/)
+  })
+})
+
+describe('parseCreateNotebookAck', () => {
+  it('extracts direct and one-level-nested id hints', () => {
+    expect(parseCreateNotebookAck(['Title', null, 'nb-1'])).toEqual({ hintedId: 'nb-1' })
+    expect(parseCreateNotebookAck([['Title', null, 'nb-2']])).toEqual({ hintedId: 'nb-2' })
+  })
+
+  it('treats accepted unknown shapes as acknowledgements without a hint', () => {
+    expect(parseCreateNotebookAck(null)).toEqual({})
+    expect(parseCreateNotebookAck(['Title', null, null])).toEqual({})
+    expect(parseCreateNotebookAck({ id: 'nb-1' })).toEqual({})
+    expect(parseCreateNotebookAck([['Title', null, 'nb-1'], 'unexpected-tail'])).toEqual({})
   })
 })

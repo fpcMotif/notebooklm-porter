@@ -1,26 +1,6 @@
 import type { Playlist, Post, Thread } from '../model/types'
+import { CAPTURED_AT_KEY, frontmatterBlock } from './frontmatter'
 import type { FormatOptions } from './types'
-
-/** Minimal YAML scalar escaping — wrap in double quotes if it needs it. */
-function yamlScalar(value: string): string {
-  if (value === '') return '""'
-  const needsQuoting = /[:#?\-[\]{}&*!|>'"%@`\n]/.test(value) || /^\s|\s$/.test(value)
-  if (!needsQuoting) return value
-  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
-}
-
-function frontmatterLines(
-  fields: Array<[string, string | number | boolean | undefined]>,
-): string[] {
-  const lines = ['---']
-  for (const [key, value] of fields) {
-    if (value === undefined) continue
-    const rendered = typeof value === 'string' ? yamlScalar(value) : String(value)
-    lines.push(`${key}: ${rendered}`)
-  }
-  lines.push('---')
-  return lines
-}
 
 /** Escape characters that would break a Markdown table cell. */
 function escapeTableCell(value: string): string {
@@ -94,12 +74,12 @@ export function threadToMarkdown(
 ): string {
   const posts = filterPosts(thread.posts, options)
 
-  const fm = frontmatterLines([
+  const fm = frontmatterBlock([
     ['source', thread.site],
     ['url', thread.url],
     ['title', thread.title],
     ['author', authorLabel(thread.author)],
-    ['captured_at', capturedAt],
+    [CAPTURED_AT_KEY, capturedAt],
     ['truncated', thread.truncated ?? false],
     ['score', thread.stats?.score],
     ['reply_count', thread.stats?.replyCount],
@@ -133,12 +113,12 @@ function captionsGlyph(hasCaptions: boolean | undefined): string {
  * created by the ingest layer, not here.
  */
 export function playlistToMarkdown(playlist: Playlist, capturedAt: string): string {
-  const fm = frontmatterLines([
+  const fm = frontmatterBlock([
     ['source', 'youtube'],
     ['url', playlist.url],
     ['title', playlist.title],
     ['channel', playlist.channel],
-    ['captured_at', capturedAt],
+    [CAPTURED_AT_KEY, capturedAt],
     ['truncated', playlist.truncated ?? false],
     ['video_count', playlist.videoCount],
   ])

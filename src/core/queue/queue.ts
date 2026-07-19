@@ -1,17 +1,12 @@
+import { notebookTargetKey, sameNotebookTarget, type NotebookTarget } from '../accounts/ownership'
 import type { IngestUnit } from '../ingest/units'
 
 export type QueueStatus = 'queued' | 'retrying' | 'inFlight' | 'failed' | 'uncertain' | 'blocked'
 
-export interface QueueTarget {
-  notebookId: string
-  authuser: number
-  accountEmail: string
-}
-
 export interface QueueJob {
   id: string
   docIds: string[]
-  target: QueueTarget
+  target: NotebookTarget
   unit: IngestUnit
   status: QueueStatus
   attempts: number
@@ -50,12 +45,20 @@ export function emptyQueue(): QueueState {
   return { version: 1, roundRobinCursor: 0, jobs: [] }
 }
 
-function queueJobId(target: QueueTarget, unit: IngestUnit): string {
-  return [target.accountEmail, target.notebookId, unit.id, unit.contentHash].join(':')
+function queueJobId(target: NotebookTarget, unit: IngestUnit): string {
+  return JSON.stringify(['queue-delivery:v2', notebookTargetKey(target), unit.id, unit.contentHash])
+}
+
+function isSameDelivery(job: QueueJob, target: NotebookTarget, unit: IngestUnit): boolean {
+  return (
+    sameNotebookTarget(job.target, target) &&
+    job.unit.id === unit.id &&
+    job.unit.contentHash === unit.contentHash
+  )
 }
 
 function targetKey(job: QueueJob): string {
-  return `${job.target.accountEmail}:${job.target.notebookId}`
+  return notebookTargetKey(job.target)
 }
 
 function mergeDocIds(existing: string[], next: string): string[] {
@@ -65,14 +68,16 @@ function mergeDocIds(existing: string[], next: string): string[] {
 /** Adds immutable unit snapshots, merging only exact same-version deliveries. */
 export function enqueueUnits(
   state: QueueState,
-  target: QueueTarget,
+  target: NotebookTarget,
   units: readonly IngestUnit[],
   now: string,
 ): QueueState {
   let jobs = state.jobs
   for (const unit of units) {
     const id = queueJobId(target, unit)
-    const index = jobs.findIndex((job) => job.id === id)
+    // Persisted v1 jobs predate authuser in the serialized id but already
+    // store the complete immutable target.
+    const index = jobs.findIndex((job) => isSameDelivery(job, target, unit))
     if (index >= 0) {
       const existing = jobs[index]
       if (existing === undefined) continue
@@ -105,8 +110,8 @@ export function enqueueUnits(
       {
         id,
         docIds: [unit.docId],
-        target,
-        unit,
+        target: { ...target },
+        unit: { ...unit },
         status: 'queued',
         attempts: 0,
         enqueuedAt: now,
@@ -124,7 +129,7 @@ export function enqueueUnits(
  */
 export function supersedePendingUnitVersions(
   state: QueueState,
-  target: QueueTarget,
+  target: NotebookTarget,
   units: readonly IngestUnit[],
 ): QueueState {
   const incomingHashes = new Map(units.map((unit) => [unit.id, unit.contentHash]))
@@ -132,9 +137,7 @@ export function supersedePendingUnitVersions(
     ...state,
     jobs: state.jobs.filter((job) => {
       const incomingHash = incomingHashes.get(job.unit.id)
-      const sameTarget =
-        job.target.notebookId === target.notebookId &&
-        job.target.accountEmail === target.accountEmail
+      const sameTarget = sameNotebookTarget(job.target, target)
       const safelyReplaceable =
         job.status === 'queued' || job.status === 'retrying' || job.status === 'blocked'
       return !(
@@ -176,7 +179,7 @@ export function markInFlight(state: QueueState, jobId: string, now: string): Que
   if (!state.jobs.some((job) => job.id === jobId)) return state
   return {
     ...replaceJob(state, jobId, (job) => {
-      const { nextAttemptAt: _nextAttemptAt, ...rest } = job
+      const { nextAttemptAt: _nextAttemptAt, lastError: _lastError, ...rest } = job
       return { ...rest, status: 'inFlight', attempts: job.attempts + 1, updatedAt: now }
     }),
     roundRobinCursor: state.roundRobinCursor + 1,
@@ -271,13 +274,45 @@ export function queueSnapshot(state: QueueState): QueueSnapshot {
   return {
     jobs: state.jobs.map((job) => ({
       id: job.id,
-      docIds: job.docIds,
+      docIds: [...job.docIds],
       unitId: job.unit.id,
       status: job.status,
       attempts: job.attempts,
       ...(job.nextAttemptAt !== undefined ? { nextAttemptAt: job.nextAttemptAt } : {}),
       ...(job.lastError !== undefined ? { lastError: job.lastError } : {}),
     })),
+  }
+}
+
+export interface QueueSummary {
+  queued: number
+  failed: number
+  uncertain: number
+  blocked: number
+  /** ids of failed | uncertain jobs, in job order. */
+  retryJobIds: string[]
+  error?: string
+}
+
+/**
+ * Aggregates a snapshot into the counts/retry set the popup surfaces.
+ * Empty snapshot → undefined (the popup clears its banner).
+ */
+export function summarizeQueue(snapshot: QueueSnapshot): QueueSummary | undefined {
+  if (snapshot.jobs.length === 0) return undefined
+  const queued = snapshot.jobs.filter(
+    (job) => job.status === 'queued' || job.status === 'retrying' || job.status === 'inFlight',
+  )
+  const retryable = snapshot.jobs.filter(
+    (job) => job.status === 'failed' || job.status === 'uncertain',
+  )
+  return {
+    queued: queued.length,
+    failed: snapshot.jobs.filter((job) => job.status === 'failed').length,
+    uncertain: snapshot.jobs.filter((job) => job.status === 'uncertain').length,
+    blocked: snapshot.jobs.filter((job) => job.status === 'blocked').length,
+    retryJobIds: retryable.map((job) => job.id),
+    ...(retryable[0]?.lastError ? { error: retryable[0].lastError } : {}),
   }
 }
 
