@@ -25,12 +25,21 @@ import {
   sourceArtifactKey,
   type DriveRequest,
 } from './drive'
+import {
+  CLEARED_TOKEN_CACHE,
+  cacheFromAuthResult,
+  isUnauthorizedStatus,
+  shouldReuse,
+  type CachedToken,
+} from './token-cache'
 import { DriveAuthError, DriveApiError, HttpStatusError, type StorageError } from '../fx/errors'
 import { DebugLog, Http, Identity, Kv } from '../fx/services'
 import { getSettings } from '../settings'
 import { listDocs } from '../store'
+import type { SourceDoc } from '../model/types'
 
 const BACKUP_FOLDER_NAME = 'NotebookLM Porter'
+export const DRIVE_TOKEN_CACHE_KEY = 'porter/drive-token'
 const backupPermit = Semaphore.makeUnsafe(1)
 const MAX_LIST_PAGES = 100
 
@@ -195,7 +204,10 @@ function isUnownedFolder(file: DriveFile): boolean {
   )
 }
 
-function authenticate(clientId: string): Effect.Effect<string, DriveAuthError, Identity> {
+/** Runs the interactive OAuth flow and persists the resulting token + expiry for reuse. */
+function authenticate(
+  clientId: string,
+): Effect.Effect<string, DriveAuthError | StorageError, Identity | Kv> {
   return Effect.gen(function* () {
     const identity = yield* Identity
     const redirectUri = identity.redirectUrl()
@@ -206,7 +218,33 @@ function authenticate(clientId: string): Effect.Effect<string, DriveAuthError, I
     if ('error' in result) {
       return yield* Effect.fail(new DriveAuthError({ reason: result.error }))
     }
+
+    const kv = yield* Kv
+    yield* kv.set<CachedToken>(
+      DRIVE_TOKEN_CACHE_KEY,
+      cacheFromAuthResult(result.accessToken, result.expiresInSec, Date.now()),
+    )
     return result.accessToken
+  })
+}
+
+/** Reuses the cached token when it's still valid, otherwise runs the interactive flow. */
+function resolveToken(
+  clientId: string,
+): Effect.Effect<string, DriveAuthError | StorageError, Identity | Kv> {
+  return Effect.gen(function* () {
+    const kv = yield* Kv
+    const cached = yield* kv.get<CachedToken>(DRIVE_TOKEN_CACHE_KEY)
+    if (shouldReuse(cached, Date.now())) return cached.accessToken
+    return yield* authenticate(clientId)
+  })
+}
+
+/** Clears the cached token so a dead one can never be reused, independent of whether re-auth succeeds. */
+function invalidateToken(): Effect.Effect<void, StorageError, Kv> {
+  return Effect.gen(function* () {
+    const kv = yield* Kv
+    yield* kv.set<CachedToken>(DRIVE_TOKEN_CACHE_KEY, CLEARED_TOKEN_CACHE)
   })
 }
 
@@ -252,10 +290,64 @@ function findOrCreateFolder(token: string): Effect.Effect<string, DriveApiError,
   })
 }
 
+interface RequestedDoc {
+  docId: string
+  doc: SourceDoc | undefined
+}
+
+interface BackupAttempt {
+  outcomes: BackupOutcome[]
+  /** Set the moment any Drive request in this attempt 401s — the token is dead. */
+  unauthorized: boolean
+}
+
+/**
+ * One full pass over the already-resolved `requested` docs with a single
+ * token. Stops as soon as any request comes back unauthorized instead of
+ * grinding through the rest of the batch with a token that's already known to
+ * be dead — the caller invalidates the cache and retries the whole pass once
+ * with a fresh token. A non-401 folder failure still propagates as a
+ * `DriveApiError`, unchanged.
+ */
+function runAttempt(
+  token: string,
+  requested: RequestedDoc[],
+): Effect.Effect<BackupAttempt, DriveApiError, Http | DebugLog> {
+  return Effect.gen(function* () {
+    const folderResult = yield* Effect.result(findOrCreateFolder(token))
+    if (Result.isFailure(folderResult)) {
+      if (isUnauthorizedStatus(folderResult.failure.status)) {
+        return { outcomes: [], unauthorized: true }
+      }
+      return yield* Effect.fail(folderResult.failure)
+    }
+    const folderId = folderResult.success
+
+    const outcomes: BackupOutcome[] = []
+    for (const { docId, doc } of requested) {
+      if (doc === undefined) {
+        outcomes.push({ docId, ok: false, error: 'Doc not found' })
+        continue
+      }
+
+      // Sequential + isolated by design: one doc's failure must not abort the
+      // rest of the batch, and Drive quota is per-request anyway.
+      const docResult = yield* backupOne(token, folderId, docId, doc.title, doc.markdown)
+      outcomes.push(docResult.outcome)
+      if (docResult.unauthorized) return { outcomes, unauthorized: true }
+    }
+    return { outcomes, unauthorized: false }
+  })
+}
+
 /**
  * Backs up the given docs to the user's Drive, one file per doc inside a
  * single "NotebookLM Porter" folder. Per-doc isolation via `Effect.result`
- * so one failing upload never aborts the rest of the batch.
+ * so one failing upload never aborts the rest of the batch. Reuses the cached
+ * OAuth token when it's still valid, skipping the interactive flow entirely;
+ * if any request comes back unauthorized (dead/expired/revoked token), the
+ * cache is cleared and the whole pass is retried once with a fresh
+ * interactive auth.
  */
 export function backupDocsToDrive(
   docIds: string[],
@@ -270,7 +362,7 @@ export function backupDocsToDrive(
       // not trigger OAuth, create a folder, or otherwise mutate the account.
       const docs = yield* listDocs()
       const byId = new Map(docs.map((doc) => [doc.id, doc]))
-      const requested = docIds.map((docId) => ({ docId, doc: byId.get(docId) }))
+      const requested: RequestedDoc[] = docIds.map((docId) => ({ docId, doc: byId.get(docId) }))
       if (!requested.some(({ doc }) => doc !== undefined)) {
         return requested.map(({ docId }) => ({ docId, ok: false, error: 'Doc not found' }))
       }
@@ -281,23 +373,27 @@ export function backupDocsToDrive(
         return yield* Effect.fail(new DriveAuthError({ reason: 'missing-client-id' }))
       }
 
-      const token = yield* authenticate(clientId)
-      const folderId = yield* findOrCreateFolder(token)
+      const token = yield* resolveToken(clientId)
+      const attempt = yield* runAttempt(token, requested)
+      if (!attempt.unauthorized) return attempt.outcomes
 
-      const outcomes: BackupOutcome[] = []
-      for (const { docId, doc } of requested) {
-        if (doc === undefined) {
-          outcomes.push({ docId, ok: false, error: 'Doc not found' })
-          continue
-        }
-
-        // Sequential + isolated by design: one doc's failure must not abort the
-        // rest of the batch, and Drive quota is per-request anyway.
-        outcomes.push(yield* backupOne(token, folderId, docId, doc.title, doc.markdown))
+      yield* invalidateToken()
+      const freshToken = yield* authenticate(clientId)
+      const retry = yield* runAttempt(freshToken, requested)
+      if (retry.unauthorized) {
+        return yield* Effect.fail(
+          new DriveAuthError({ reason: 'still unauthorized after re-authenticating' }),
+        )
       }
-      return outcomes
+      return retry.outcomes
     }),
   )
+}
+
+interface DocRunResult {
+  outcome: BackupOutcome
+  /** Set when this doc's failure was a 401 — signals the whole token is dead. */
+  unauthorized: boolean
 }
 
 function backupOne(
@@ -306,7 +402,7 @@ function backupOne(
   docId: string,
   title: string,
   content: string,
-): Effect.Effect<BackupOutcome, never, Http | DebugLog> {
+): Effect.Effect<DocRunResult, never, Http | DebugLog> {
   return Effect.gen(function* () {
     const debugLog = yield* DebugLog
     const result = yield* Effect.result(
@@ -389,8 +485,11 @@ function backupOne(
     if (Result.isFailure(result)) {
       const message = `${result.failure.step}: ${result.failure.status}`
       yield* debugLog.log('drive', 'upload', { docId, outcome: 'failed', error: message })
-      return { docId, ok: false, error: message }
+      return {
+        outcome: { docId, ok: false, error: message },
+        unauthorized: isUnauthorizedStatus(result.failure.status),
+      }
     }
-    return { docId, ok: true }
+    return { outcome: { docId, ok: true }, unauthorized: false }
   })
 }

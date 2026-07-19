@@ -4,7 +4,8 @@ import { DriveApiError, DriveAuthError, HttpStatusError } from '../fx/errors'
 import type { HttpInit } from '../fx/services'
 import { Http, Identity } from '../fx/services'
 import { debugLogTest, identityTest, kvTest } from '../fx/testing'
-import { backupDocsToDrive } from './client'
+import { DRIVE_TOKEN_CACHE_KEY, backupDocsToDrive } from './client'
+import type { CachedToken } from './token-cache'
 import type { SourceDoc, ThreadSourceDoc } from '../model/types'
 
 const NoopDebugLog = debugLogTest()
@@ -92,6 +93,8 @@ interface HttpFixture {
   failUrlContains?: string
   failMethod?: string
   requests?: { url: string; method: string; body: string }[]
+  /** Sink for each request's bearer token — lets a test assert which token was used. */
+  authLog?: string[]
 }
 
 function makeHttpLayer(fixture: HttpFixture) {
@@ -104,6 +107,8 @@ function makeHttpLayer(fixture: HttpFixture) {
           const decoded = decodeURIComponent(url)
           const body = init?.body ?? ''
           fixture.requests?.push({ url: decoded, method, body })
+          const auth = init?.headers?.Authorization ?? ''
+          fixture.authLog?.push(auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : auth)
 
           if (method === 'GET' && isFolderQuery(url)) {
             const files =
@@ -983,6 +988,230 @@ describe('backupDocsToDrive', () => {
       ),
       Effect.provide(AuthOk),
       Effect.provide(makeHttpLayer({ folderId: 'folder-1', requests })),
+      Effect.provide(NoopDebugLog),
+    )
+  })
+})
+
+/**
+ * A `kvTest`-backed store the test keeps a handle on: `kvTest` mutates the
+ * `Map` in place, so `set`s land in `store` and the token cache written by
+ * `authenticate`/`invalidateToken` can be read back after the effect runs.
+ */
+function statefulKv(seed: Record<string, unknown>) {
+  const store = new Map<string, unknown>(Object.entries(seed))
+  return { layer: kvTest(store), store }
+}
+
+/** Counts `launchAuthFlow` calls so tests can assert the interactive flow ran (or didn't). */
+function makeIdentityLayer(opts: {
+  accessToken: string
+  expiresInSec?: number
+  onLaunch: () => void
+}) {
+  return Layer.succeed(
+    Identity,
+    Identity.of({
+      redirectUrl: () => 'https://abc.chromiumapp.org/',
+      launchAuthFlow: () =>
+        Effect.sync(opts.onLaunch).pipe(
+          Effect.as(
+            `https://abc.chromiumapp.org/#access_token=${opts.accessToken}&expires_in=${opts.expiresInSec ?? 3599}`,
+          ),
+        ),
+    }),
+  )
+}
+
+/** Every Drive request 401s unless it's bearing `validToken` — models a dead cached token. */
+function makeAuthGatedHttpLayer(opts: { validToken: string; folderId?: string }) {
+  return Layer.succeed(
+    Http,
+    Http.of({
+      text: (url: string, init?: HttpInit) =>
+        Effect.gen(function* () {
+          const auth = init?.headers?.Authorization ?? ''
+          const token = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : ''
+          if (token !== opts.validToken) {
+            return yield* Effect.fail(new HttpStatusError({ url, status: 401 }))
+          }
+
+          const method = init?.method ?? 'GET'
+          const decoded = decodeURIComponent(url)
+          if (method === 'GET' && isFolderQuery(url)) {
+            return listResponse(
+              opts.folderId !== undefined
+                ? [
+                    {
+                      id: opts.folderId,
+                      name: 'NotebookLM Porter',
+                      mimeType: 'application/vnd.google-apps.folder',
+                      appProperties: { notebookLmPorterArtifact: 'backup-folder:v1' },
+                    },
+                  ]
+                : [],
+            )
+          }
+          if (method === 'GET') return listResponse([])
+          if (method === 'POST' && !decoded.includes('uploadType')) {
+            return JSON.stringify({ id: 'new-folder-id' })
+          }
+          return JSON.stringify({ id: 'new-file-id' })
+        }),
+      json: () => Effect.die('unused in backup tests'),
+    }),
+  )
+}
+
+/** Every Drive request 401s, regardless of token — models re-auth also failing. */
+const AlwaysUnauthorizedHttp = Layer.succeed(
+  Http,
+  Http.of({
+    text: (url: string) => Effect.fail(new HttpStatusError({ url, status: 401 })),
+    json: () => Effect.die('unused in backup tests'),
+  }),
+)
+
+describe('backupDocsToDrive token caching', () => {
+  it.effect('reuses a still-valid cached token and never runs the interactive flow', () => {
+    let launchCount = 0
+    const authLog: string[] = []
+    const kv = statefulKv({
+      'porter/docs': [makeDoc({ id: sourceId('a'), title: 'Fresh Doc' })],
+      'porter/settings': { driveClientId: 'client-1' },
+      [DRIVE_TOKEN_CACHE_KEY]: {
+        accessToken: 'cached-token',
+        expiresAt: Date.now() + 60 * 60 * 1000,
+      } satisfies CachedToken,
+    })
+
+    return Effect.gen(function* () {
+      const outcomes = yield* backupDocsToDrive([sourceId('a')])
+      assert.deepStrictEqual(outcomes, [{ docId: sourceId('a'), ok: true }])
+      assert.strictEqual(launchCount, 0)
+      assert.isTrue(authLog.every((token) => token === 'cached-token'))
+      assert.isTrue(authLog.length > 0)
+    }).pipe(
+      Effect.provide(kv.layer),
+      Effect.provide(
+        makeIdentityLayer({ accessToken: 'unused', onLaunch: () => (launchCount += 1) }),
+      ),
+      Effect.provide(makeHttpLayer({ authLog })),
+      Effect.provide(NoopDebugLog),
+    )
+  })
+
+  it.effect('runs the interactive flow and caches the result when there is no cached token', () => {
+    let launchCount = 0
+    const kv = statefulKv({
+      'porter/docs': [makeDoc({ id: sourceId('a'), title: 'Fresh Doc' })],
+      'porter/settings': { driveClientId: 'client-1' },
+    })
+
+    return Effect.gen(function* () {
+      const before = Date.now()
+      const outcomes = yield* backupDocsToDrive([sourceId('a')])
+      assert.deepStrictEqual(outcomes, [{ docId: sourceId('a'), ok: true }])
+      assert.strictEqual(launchCount, 1)
+
+      const cached = kv.store.get(DRIVE_TOKEN_CACHE_KEY) as CachedToken
+      assert.strictEqual(cached.accessToken, 'fresh-token')
+      assert.isTrue(cached.expiresAt >= before + 3599 * 1000)
+    }).pipe(
+      Effect.provide(kv.layer),
+      Effect.provide(
+        makeIdentityLayer({ accessToken: 'fresh-token', onLaunch: () => (launchCount += 1) }),
+      ),
+      Effect.provide(makeHttpLayer({})),
+      Effect.provide(NoopDebugLog),
+    )
+  })
+
+  it.effect('runs the interactive flow when the cached token is within the safety margin', () => {
+    let launchCount = 0
+    const kv = statefulKv({
+      'porter/docs': [makeDoc({ id: sourceId('a'), title: 'Fresh Doc' })],
+      'porter/settings': { driveClientId: 'client-1' },
+      // Expires in 30s — inside the 60s safety margin, so it must not be reused.
+      [DRIVE_TOKEN_CACHE_KEY]: {
+        accessToken: 'about-to-expire',
+        expiresAt: Date.now() + 30_000,
+      } satisfies CachedToken,
+    })
+
+    return Effect.gen(function* () {
+      const outcomes = yield* backupDocsToDrive([sourceId('a')])
+      assert.deepStrictEqual(outcomes, [{ docId: sourceId('a'), ok: true }])
+      assert.strictEqual(launchCount, 1)
+    }).pipe(
+      Effect.provide(kv.layer),
+      Effect.provide(
+        makeIdentityLayer({ accessToken: 'fresh-token', onLaunch: () => (launchCount += 1) }),
+      ),
+      Effect.provide(makeHttpLayer({})),
+      Effect.provide(NoopDebugLog),
+    )
+  })
+})
+
+describe('backupDocsToDrive 401 handling', () => {
+  it.effect('clears the cached token and retries once with a fresh interactive auth', () => {
+    let launchCount = 0
+    const kv = statefulKv({
+      'porter/docs': [makeDoc({ id: sourceId('a'), title: 'Fresh Doc' })],
+      'porter/settings': { driveClientId: 'client-1' },
+      [DRIVE_TOKEN_CACHE_KEY]: {
+        accessToken: 'stale-token',
+        expiresAt: Date.now() + 60 * 60 * 1000,
+      } satisfies CachedToken,
+    })
+
+    return Effect.gen(function* () {
+      const outcomes = yield* backupDocsToDrive([sourceId('a')])
+      assert.deepStrictEqual(outcomes, [{ docId: sourceId('a'), ok: true }])
+      // Exactly one interactive auth: the stale cached token was tried first
+      // (and rejected), then a single fresh auth succeeded.
+      assert.strictEqual(launchCount, 1)
+
+      const cached = kv.store.get(DRIVE_TOKEN_CACHE_KEY) as CachedToken
+      assert.strictEqual(cached.accessToken, 'fresh-token')
+    }).pipe(
+      Effect.provide(kv.layer),
+      Effect.provide(
+        makeIdentityLayer({ accessToken: 'fresh-token', onLaunch: () => (launchCount += 1) }),
+      ),
+      Effect.provide(makeAuthGatedHttpLayer({ validToken: 'fresh-token' })),
+      Effect.provide(NoopDebugLog),
+    )
+  })
+
+  it.effect('gives up after exactly one retry when re-authenticating is still unauthorized', () => {
+    let launchCount = 0
+    const kv = statefulKv({
+      'porter/docs': [makeDoc({ id: sourceId('a'), title: 'Fresh Doc' })],
+      'porter/settings': { driveClientId: 'client-1' },
+      [DRIVE_TOKEN_CACHE_KEY]: {
+        accessToken: 'stale-token',
+        expiresAt: Date.now() + 60 * 60 * 1000,
+      } satisfies CachedToken,
+    })
+
+    return Effect.gen(function* () {
+      const result = yield* Effect.result(backupDocsToDrive([sourceId('a')]))
+      assert.isTrue(Result.isFailure(result))
+      if (Result.isFailure(result)) {
+        assert.instanceOf(result.failure, DriveAuthError)
+        assert.strictEqual(result.failure.reason, 'still unauthorized after re-authenticating')
+      }
+      // Not called twice more (or in a loop): the cached token wasn't
+      // interactive, then exactly one retry, then give up.
+      assert.strictEqual(launchCount, 1)
+    }).pipe(
+      Effect.provide(kv.layer),
+      Effect.provide(
+        makeIdentityLayer({ accessToken: 'still-fresh-token', onLaunch: () => (launchCount += 1) }),
+      ),
+      Effect.provide(AlwaysUnauthorizedHttp),
       Effect.provide(NoopDebugLog),
     )
   })
