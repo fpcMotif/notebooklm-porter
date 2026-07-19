@@ -40,8 +40,9 @@ function addSourceResponse(): string {
   return `)]}'\n${frame.length}\n${frame}\n`
 }
 
-function listNotebooksResponse(notebookId = 'nb-1'): string {
-  const payload = JSON.stringify([[['Target notebook', null, notebookId]]])
+function listNotebooksResponse(notebookIds: string | readonly string[] = 'nb-1'): string {
+  const ids = typeof notebookIds === 'string' ? [notebookIds] : notebookIds
+  const payload = JSON.stringify([ids.map((notebookId) => ['Target notebook', null, notebookId])])
   const frame = JSON.stringify([['wrb.fr', RPC_IDS.listNotebooks, payload]])
   return `)]}'\n${frame.length}\n${frame}\n`
 }
@@ -87,10 +88,12 @@ function runtime(
     postFailure?: HttpStatusError
     sourceResponse?: string
     listedNotebookId?: string
+    listedNotebookIds?: string[]
     listProtocolDrift?: boolean
     sourcesResponse?: string
     sourcesProtocolDrift?: boolean
     sourcesFailure?: FetchError | HttpStatusError
+    sourcesFailureForNotebookId?: string
     domResult?: DomDeliveryResult
     domAvailable?: boolean
     tierState?: TierState
@@ -124,11 +127,21 @@ function runtime(
             if (opts.listProtocolDrift) {
               return Effect.succeed(protocolDriftResponse())
             }
-            return Effect.succeed(listNotebooksResponse(opts.listedNotebookId))
+            return Effect.succeed(
+              listNotebooksResponse(opts.listedNotebookIds ?? opts.listedNotebookId),
+            )
           }
           if (init.body?.includes(RPC_IDS.getNotebook)) {
             sourceListCalls += 1
-            if (opts.sourcesFailure !== undefined) return Effect.fail(opts.sourcesFailure)
+            const sourcePath = new URL(url).searchParams.get('source-path')
+            const sourcesFailure = opts.sourcesFailure
+            if (
+              sourcesFailure !== undefined &&
+              (opts.sourcesFailureForNotebookId === undefined ||
+                sourcePath === `/notebook/${opts.sourcesFailureForNotebookId}`)
+            ) {
+              return Effect.fail(sourcesFailure)
+            }
             if (opts.sourcesProtocolDrift) return Effect.succeed(protocolDriftResponse())
             return Effect.succeed(opts.sourcesResponse ?? listSourcesResponse())
           }
@@ -564,7 +577,7 @@ describe('drainQueue', () => {
     }),
   )
 
-  it.effect('retries and stops the burst when the source listing is unreachable', () =>
+  it.effect('retries every same-notebook job after one unreachable source listing', () =>
     Effect.gen(function* () {
       const fx = runtime({
         queue: enqueueUnits(emptyQueue(), target, [youtubeUnit, unit], NOW),
@@ -578,13 +591,40 @@ describe('drainQueue', () => {
 
       assert.deepStrictEqual(result, {
         status: 'retrying',
-        jobId: `f@example.com:nb-1:${youtubeUnit.id}:${youtubeUnit.contentHash}`,
+        jobId: `f@example.com:nb-1:${unit.id}:${unit.contentHash}`,
       })
       assert.strictEqual(fx.posts(), 0)
       assert.strictEqual(fx.sourceListCalls(), 1)
       const finalQueue = fx.values.get(QUEUE_STORAGE_KEY) as ReturnType<typeof emptyQueue>
       assert.strictEqual(finalQueue.jobs[0]?.status, 'retrying')
-      assert.strictEqual(finalQueue.jobs[1]?.status, 'queued')
+      assert.strictEqual(finalQueue.jobs[1]?.status, 'retrying')
+    }),
+  )
+
+  it.effect('continues draining another notebook after one source listing fails', () =>
+    Effect.gen(function* () {
+      const otherTarget = { ...target, notebookId: 'nb-2' }
+      const first = enqueueUnits(emptyQueue(), target, [youtubeUnit], NOW)
+      const queue = enqueueUnits(first, otherTarget, [unit], NOW)
+      const fx = runtime({
+        queue,
+        listedNotebookIds: ['nb-1', 'nb-2'],
+        sourcesFailure: new FetchError({
+          url: 'https://notebooklm.google.com',
+          cause: 'offline',
+        }),
+        sourcesFailureForNotebookId: 'nb-1',
+      })
+
+      const result = yield* drainQueue({ now: NOW }).pipe(Effect.provide(fx.layer))
+
+      assert.strictEqual(result.status, 'sent')
+      assert.strictEqual(fx.posts(), 1)
+      assert.strictEqual(fx.sourceListCalls(), 2)
+      const finalQueue = fx.values.get(QUEUE_STORAGE_KEY) as ReturnType<typeof emptyQueue>
+      assert.strictEqual(finalQueue.jobs.length, 1)
+      assert.strictEqual(finalQueue.jobs[0]?.target.notebookId, 'nb-1')
+      assert.strictEqual(finalQueue.jobs[0]?.status, 'retrying')
     }),
   )
 

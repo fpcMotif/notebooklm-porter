@@ -143,6 +143,21 @@ function settlePreflightFailure(
   return { queue: settledQueue, status: settledJob?.status === 'retrying' ? 'retrying' : 'failed' }
 }
 
+function settleSourceListingFailure(
+  queue: QueueState,
+  job: QueueJob,
+  now: string,
+): { queue: QueueState; status: 'retrying' | 'failed' } {
+  const settledQueue = settleRetryableFailure(
+    queue,
+    job.id,
+    'Could not list the target notebook sources',
+    now,
+  )
+  const settledJob = settledQueue.jobs.find((candidate) => candidate.id === job.id)
+  return { queue: settledQueue, status: settledJob?.status === 'retrying' ? 'retrying' : 'failed' }
+}
+
 /**
  * Drains every currently-due job in one pass. Identity (session), the
  * read-only tier-A canary (listNotebooks), and the target notebook's live
@@ -190,6 +205,7 @@ export function drainQueue(
     // Burst-scoped notebook source listings — the server-side truth the ledger
     // only approximates. Keyed by notebookId (UUIDs are globally unique).
     const sourcesByNotebook = new Map<string, NotebookSource[]>()
+    const failedSourceListings = new Set<string>()
     let tierState = yield* loadTierState()
     let lastResult: DrainResult = { status: 'idle' }
 
@@ -377,6 +393,13 @@ export function drainQueue(
       // Server-side reconciliation: NotebookLM is append-only, so a unit already
       // present in the notebook must never be resent — even when the local ledger
       // has no receipt (wiped storage, other device, uncertain retry that landed).
+      if (failedSourceListings.has(job.target.notebookId)) {
+        const settled = settleSourceListingFailure(queue, job, now)
+        queue = settled.queue
+        yield* saveQueue(queue)
+        lastResult = { status: settled.status, jobId: job.id }
+        continue
+      }
       let sources = sourcesByNotebook.get(job.target.notebookId)
       if (sources === undefined) {
         const sourcesResult = yield* Effect.result(
@@ -405,24 +428,18 @@ export function drainQueue(
             sourcesResult.failure instanceof FetchError ||
             sourcesResult.failure instanceof HttpStatusError
           if (isNetwork) {
-            const settledQueue = settleRetryableFailure(
-              queue,
-              job.id,
-              'Could not list the target notebook sources',
-              now,
-            )
-            const settledJob = settledQueue.jobs.find((candidate) => candidate.id === job.id)
-            const status = settledJob?.status === 'retrying' ? 'retrying' : 'failed'
+            failedSourceListings.add(job.target.notebookId)
+            const settled = settleSourceListingFailure(queue, job, now)
             yield* debugLog.log(
               'queue',
               'source listing failed',
-              { disposition: status, error: String(sourcesResult.failure) },
-              { run, level: status === 'retrying' ? 'warn' : 'error' },
+              { disposition: settled.status, error: String(sourcesResult.failure) },
+              { run, level: settled.status === 'retrying' ? 'warn' : 'error' },
             )
-            queue = settledQueue
+            queue = settled.queue
             yield* saveQueue(queue)
-            lastResult = { status, jobId: job.id }
-            break // listing unreachable applies to every remaining job for this notebook
+            lastResult = { status: settled.status, jobId: job.id }
+            continue
           }
           const settled = settleFailure(queue, job, sourcesResult.failure, now)
           yield* debugLog.log(
