@@ -1,5 +1,6 @@
 import { assert, describe, it } from '@effect/vitest'
 import { Effect, Layer } from 'effect'
+import { notebookTargetKey } from './accounts/ownership'
 import type { DebugEntry } from './debug'
 import { alarmsTest, debugLogTest, httpTest, identityTest, kvTest, tabsTest } from './fx/testing'
 import { buildRpcUrl, homeUrl, RPC_IDS } from './ingest/rpc/protocol'
@@ -9,9 +10,10 @@ import {
   rpcResponse,
   youtubeSourceEntry,
 } from './ingest/rpc/testing'
-import type { ThreadSourceDoc } from './model/types'
+import type { ThreadSourceDoc, VideoSourceDoc } from './model/types'
 import { domainsForMessage, handlePorterMessage, MESSAGE_DOMAINS } from './router'
 import { DEFAULT_SETTINGS } from './settings'
+import { LEDGER_STORAGE_KEY, loadLedger } from './store/ledger'
 
 const TARGET_SESSION_HTML = nblmSessionHtml({ email: 'f@example.com' })
 const ACCOUNT = { authuser: 0, accountEmail: 'f@example.com' } as const
@@ -23,10 +25,21 @@ const TARGET_LIST_URL = buildRpcUrl({
   sourcePath: '/',
 })
 
+function notebookGetUrl(notebookId = 'nb-1'): string {
+  return buildRpcUrl({
+    rpcId: RPC_IDS.getNotebook,
+    authuser: 0,
+    fSid: 'fsid-1',
+    sourcePath: `/notebook/${notebookId}`,
+  })
+}
+
 function targetHttp(notebookId = 'nb-1'): Record<string, string> {
   return {
     [homeUrl(0)]: TARGET_SESSION_HTML,
     [TARGET_LIST_URL]: rpcResponse(RPC_IDS.listNotebooks, [[['Target', null, notebookId]]]),
+    // Empty live sources so enqueue's advisory reconciliation is a no-op by default.
+    [notebookGetUrl(notebookId)]: rpcResponse(RPC_IDS.getNotebook, notebookWithSources([])),
   }
 }
 
@@ -514,6 +527,109 @@ describe('handlePorterMessage', () => {
           Effect.provide(layer),
         )
         assert.deepStrictEqual(status, reply)
+      }),
+    )
+
+    it.effect('receipts server-present units at enqueue and excludes them from the queue', () =>
+      Effect.gen(function* () {
+        const doc: VideoSourceDoc = {
+          id: 'youtube:dQw4w9WgXcQ',
+          site: 'youtube',
+          kind: 'video',
+          title: 'Never Gonna Give You Up',
+          canonicalUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+          capturedAt: '2026-07-11T00:00:00.000Z',
+          markdown: '# Never Gonna Give You Up',
+          wordCount: 5,
+          truncated: false,
+        }
+        const sink: DebugEntry[] = []
+        const layer = testLayer({
+          kv: {
+            'porter/docs': [doc],
+            'porter/settings': {
+              ...DEFAULT_SETTINGS,
+              accounts: [{ authuser: 0, email: 'f@example.com' }],
+            },
+            [LEDGER_STORAGE_KEY]: {},
+          },
+          http: {
+            ...targetHttp(),
+            [notebookGetUrl()]: rpcResponse(
+              RPC_IDS.getNotebook,
+              notebookWithSources([
+                youtubeSourceEntry('src-yt', 'https://youtu.be/dQw4w9WgXcQ', 2),
+              ]),
+            ),
+          },
+          debugSink: sink,
+          alarms: { onSchedule: () => undefined },
+        })
+
+        const reply = yield* handlePorterMessage({
+          type: 'porter/queue-enqueue',
+          docIds: [doc.id],
+          target: TARGET,
+        }).pipe(Effect.provide(layer))
+        assert.isTrue(reply.ok)
+        if (!reply.ok || !('queue' in reply)) return
+        assert.deepStrictEqual(reply.queue.jobs, [])
+        const enqueueLog = sink.find((entry) => entry.msg === 'enqueue')
+        assert.deepStrictEqual(enqueueLog?.data, {
+          notebookId: 'nb-1',
+          requestedDocs: 1,
+          plannedUnits: 1,
+          alreadySynced: 0,
+          alreadyOnServer: 1,
+          changed: 0,
+          enqueued: 0,
+          pending: 0,
+        })
+        const ledger = yield* loadLedger().pipe(Effect.provide(layer))
+        assert.isDefined(ledger[notebookTargetKey(TARGET)]?.['youtube:dQw4w9WgXcQ'])
+      }),
+    )
+
+    it.effect('falls back to ledger-only enqueue when the advisory source listing fails', () =>
+      Effect.gen(function* () {
+        const doc = makeDoc({ id: 'reddit:queued', capturedAt: '2026-07-11T00:00:00.000Z' })
+        const sink: DebugEntry[] = []
+        const layer = testLayer({
+          kv: {
+            'porter/docs': [doc],
+            'porter/settings': {
+              ...DEFAULT_SETTINGS,
+              accounts: [{ authuser: 0, email: 'f@example.com' }],
+            },
+          },
+          // No GET_NOTEBOOK response → 404 → advisory warn + ledger-only enqueue.
+          http: {
+            [homeUrl(0)]: TARGET_SESSION_HTML,
+            [TARGET_LIST_URL]: rpcResponse(RPC_IDS.listNotebooks, [[['Target', null, 'nb-1']]]),
+          },
+          debugSink: sink,
+          alarms: { onSchedule: () => undefined },
+        })
+
+        const reply = yield* handlePorterMessage({
+          type: 'porter/queue-enqueue',
+          docIds: [doc.id],
+          target: TARGET,
+        }).pipe(Effect.provide(layer))
+        assert.isTrue(reply.ok)
+        if (!reply.ok || !('queue' in reply)) return
+        assert.deepStrictEqual(
+          reply.queue.jobs.map((job) => [job.unitId, job.status]),
+          [['reddit:queued', 'queued']],
+        )
+        assert.ok(
+          sink.some(
+            (entry) =>
+              entry.msg === 'enqueue advisory source listing failed' && entry.level === 'warn',
+          ),
+        )
+        const enqueueLog = sink.find((entry) => entry.msg === 'enqueue')
+        assert.strictEqual((enqueueLog?.data as { alreadyOnServer?: number })?.alreadyOnServer, 0)
       }),
     )
 

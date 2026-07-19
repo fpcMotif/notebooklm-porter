@@ -279,6 +279,7 @@ export function listSources(
   notebookId: string,
   session: NblmSession,
   authuser: number,
+  opts: { retry?: boolean } = {},
 ): Effect.Effect<
   NotebookSource[],
   FetchError | HttpStatusError | ProtocolDrift | RpcRefused,
@@ -290,6 +291,7 @@ export function listSources(
     session,
     authuser,
     notebookSourcePath(notebookId),
+    opts,
   ).pipe(Effect.map(parseNotebookSources))
 }
 

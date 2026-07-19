@@ -17,7 +17,9 @@ import { Alarms, DebugLog, Http, Kv } from '../fx/services'
 import { deliverViaDom } from '../ingest/dom/delivery'
 import { DomTabs } from '../ingest/dom/driver'
 import { sendIngestUnit } from '../ingest/notebooklm'
-import { listNotebooks } from '../ingest/rpc/client'
+import { listNotebooks, listSources } from '../ingest/rpc/client'
+import { reconcileUnits } from '../ingest/sources/reconcile'
+import type { NotebookSource } from '../ingest/sources/model'
 import {
   degradeForPreflightDrift,
   degradedUntil,
@@ -152,14 +154,30 @@ function settlePreflightFailure(
   return { queue: settledQueue, status: settledJob?.status === 'retrying' ? 'retrying' : 'failed' }
 }
 
+function settleSourceListingFailure(
+  queue: QueueState,
+  job: QueueJob,
+  now: string,
+): { queue: QueueState; status: 'retrying' | 'failed' } {
+  const settledQueue = settleRetryableFailure(
+    queue,
+    job.id,
+    'Could not list the target notebook sources',
+    now,
+  )
+  const settledJob = settledQueue.jobs.find((candidate) => candidate.id === job.id)
+  return { queue: settledQueue, status: settledJob?.status === 'retrying' ? 'retrying' : 'failed' }
+}
+
 /**
- * Drains every currently-due job in one pass. Identity (session) and the
- * read-only tier-A canary (listNotebooks) are fetched ONCE per account and
- * reused across the burst — the earlier one-preflight-per-unit design spent
- * ~1.8s of session+list overhead on every send and, in production, was throttled
- * to one unit per alarm tick. Durability is unchanged: each unit is still
- * persisted inFlight → mutated → receipted → removed before the next, so a
- * worker killed mid-burst loses at most the single in-flight unit.
+ * Drains every currently-due job in one pass. Identity (session), the
+ * read-only tier-A canary (listNotebooks), and the target notebook's live
+ * source listing (listSources) are fetched once per account/notebook and
+ * reused across the burst. Server-present units are skipped + receipted
+ * before any mutation — NotebookLM is append-only with no server-side dedup.
+ * Durability is unchanged: each sent unit is still persisted
+ * inFlight → mutated → receipted → removed before the next, so a worker
+ * killed mid-burst loses at most the single in-flight unit.
  *
  * Returns the last processed job's disposition (or `idle`), so a single-job
  * queue behaves exactly as the previous one-step function did.
@@ -195,6 +213,10 @@ export function drainQueue(
     // the account-slot-reassignment window stays bounded to one drain pass.
     const authenticationByBinding = new Map<string, BoundAccountAuthentication>()
     const notebooksByAccount = new Map<string, { id: string; title: string }[]>()
+    // Burst-scoped notebook source listings — the server-side truth the ledger
+    // only approximates. Keyed by notebookId (UUIDs are globally unique).
+    const sourcesByNotebook = new Map<string, NotebookSource[]>()
+    const failedSourceListings = new Set<string>()
     let tierState = yield* loadTierState(Date.parse(now))
     let lastResult: DrainResult = { status: 'idle' }
 
@@ -378,6 +400,94 @@ export function drainQueue(
         queue = removeJob(queue, job.id)
         yield* saveQueue(queue)
         yield* debugLog.log('queue', 'skip already-synced', {}, { run })
+        lastResult = { status: 'sent', jobId: job.id }
+        continue
+      }
+
+      // Server-side reconciliation: NotebookLM is append-only, so a unit already
+      // present in the notebook must never be resent — even when the local ledger
+      // has no receipt (wiped storage, other device, uncertain retry that landed).
+      if (failedSourceListings.has(job.target.notebookId)) {
+        const settled = settleSourceListingFailure(queue, job, now)
+        queue = settled.queue
+        yield* saveQueue(queue)
+        lastResult = { status: settled.status, jobId: job.id }
+        continue
+      }
+      let sources = sourcesByNotebook.get(job.target.notebookId)
+      if (sources === undefined) {
+        const sourcesResult = yield* Effect.result(
+          listSources(job.target.notebookId, session, job.target.authuser, { retry: false }),
+        )
+        if (Result.isFailure(sourcesResult)) {
+          if (sourcesResult.failure instanceof ProtocolDrift) {
+            queue = settleTerminalFailure(
+              queue,
+              job.id,
+              'NotebookLM changed its notebook source listing; choose the target again before retrying',
+              now,
+              'blocked',
+            )
+            yield* debugLog.log(
+              'queue',
+              'source listing drift → blocked',
+              { snippet: sourcesResult.failure.snippet },
+              { run, level: 'warn' },
+            )
+            yield* saveQueue(queue)
+            lastResult = { status: 'blocked', jobId: job.id }
+            continue
+          }
+          const isNetwork =
+            sourcesResult.failure instanceof FetchError ||
+            sourcesResult.failure instanceof HttpStatusError
+          if (isNetwork) {
+            failedSourceListings.add(job.target.notebookId)
+            const settled = settleSourceListingFailure(queue, job, now)
+            yield* debugLog.log(
+              'queue',
+              'source listing failed',
+              { disposition: settled.status, error: String(sourcesResult.failure) },
+              { run, level: settled.status === 'retrying' ? 'warn' : 'error' },
+            )
+            queue = settled.queue
+            yield* saveQueue(queue)
+            lastResult = { status: settled.status, jobId: job.id }
+            continue
+          }
+          const settled = settleFailure(queue, job, sourcesResult.failure, now)
+          yield* debugLog.log(
+            'queue',
+            'source listing failed',
+            { disposition: settled.status, error: String(sourcesResult.failure) },
+            { run, level: settled.status === 'uncertain' ? 'warn' : 'error' },
+          )
+          queue = settled.queue
+          yield* saveQueue(queue)
+          lastResult = { status: settled.status, jobId: job.id }
+          continue
+        }
+        sources = sourcesResult.success
+        sourcesByNotebook.set(job.target.notebookId, sources)
+      }
+
+      const match = reconcileUnits([job.unit], sources).present[0]
+      if (match !== undefined) {
+        ledger = recordSynced(ledger, job.target, [
+          { id: job.unit.id, contentHash: job.unit.contentHash, now },
+        ])
+        yield* saveLedger(ledger)
+        queue = removeJob(queue, job.id)
+        yield* saveQueue(queue)
+        yield* debugLog.log(
+          'queue',
+          'skip server-present',
+          {
+            sourceId: match.source.id,
+            ...(match.errored ? { errored: true } : {}),
+          },
+          { run },
+        )
         lastResult = { status: 'sent', jobId: job.id }
         continue
       }

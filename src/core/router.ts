@@ -4,7 +4,7 @@
  * exercisable through the real extension. `background.ts` is now just the
  * `runtime.onMessage` listener glue over `handlePorterMessage`.
  */
-import { Effect } from 'effect'
+import { Effect, Result } from 'effect'
 import { discoverAccounts } from './accounts/discover'
 import { accountBindingFor, sameAccountBinding, verifyNotebookTarget } from './accounts/ownership'
 import { captureSource, captureViaContentScript } from './adapters/capture'
@@ -14,11 +14,13 @@ import type { PorterError } from './fx/errors'
 import { Alarms, DebugLog, type Http, type Identity, type Kv, type Tabs } from './fx/services'
 import { formatCapture } from './format/format'
 import { exportDocs } from './ingest/export'
+import { listSources } from './ingest/rpc/client'
 import {
   removeSourceDuplicates,
   retryNotebookSource,
   scanSourceConsole,
 } from './ingest/sources/console'
+import { reconcileUnits } from './ingest/sources/reconcile'
 import { planIngestUnits } from './ingest/units'
 import { type PorterMessage, type PorterReply } from './messaging'
 import type { Capture } from './model/types'
@@ -31,7 +33,7 @@ import { getSettings, notebookTargetPatch, updateSettings } from './settings'
 import { QUEUE_ALARM, enqueueUnits, queueSnapshot, retryJob } from './queue/queue'
 import { loadQueue, saveQueue } from './queue/store'
 import { deleteDoc, listDocs, storeCapturedDoc } from './store'
-import { loadLedger, partitionSynced } from './store/ledger'
+import { loadLedger, partitionSynced, recordSynced, saveLedger } from './store/ledger'
 import { canWatchSource } from './watch/eligibility'
 import { armNextWatch } from './watch/resync'
 import { loadWatches, saveWatches } from './watch/store'
@@ -145,7 +147,8 @@ const handlers: Handlers = {
     }),
   'porter/queue-enqueue': (msg) =>
     Effect.gen(function* () {
-      const { target } = yield* verifyNotebookTarget(msg.target)
+      const verified = yield* verifyNotebookTarget(msg.target)
+      const { target, account } = verified
       const docs = yield* listDocs()
       const requested = new Set(msg.docIds)
       const selectedDocs = docs.filter((doc) => requested.has(doc.id))
@@ -153,17 +156,49 @@ const handlers: Handlers = {
       // Skip units already receipted for this notebook so a re-ingest can't
       // create a second copy of an unchanged source. The logged breakdown also
       // exposes whether the ledger actually remembers a prior run.
-      const ledger = yield* loadLedger()
-      const { pending: pendingUnits, synced, changed } = partitionSynced(ledger, target, units)
+      let ledger = yield* loadLedger()
+      const { pending: ledgerPending, synced, changed } = partitionSynced(ledger, target, units)
+      // Advisory only: drain enforces. A listing failure falls back to ledger-only.
+      let pendingUnits = ledgerPending
+      let alreadyOnServer = 0
+      const debugLog = yield* DebugLog
+      const sourcesResult = yield* Effect.result(
+        listSources(target.notebookId, account.session, account.authuser, { retry: false }),
+      )
+      if (Result.isFailure(sourcesResult)) {
+        yield* debugLog.log(
+          'queue',
+          'enqueue advisory source listing failed',
+          { error: String(sourcesResult.failure) },
+          { level: 'warn' },
+        )
+      } else {
+        const { present, absent } = reconcileUnits(ledgerPending, sourcesResult.success)
+        if (present.length > 0) {
+          const now = new Date().toISOString()
+          ledger = recordSynced(
+            ledger,
+            target,
+            present.map(({ unit }) => ({
+              id: unit.id,
+              contentHash: unit.contentHash,
+              now,
+            })),
+          )
+          yield* saveLedger(ledger)
+          alreadyOnServer = present.length
+          pendingUnits = absent
+        }
+      }
       const queue = yield* loadQueue()
       const next = enqueueUnits(queue, target, pendingUnits, new Date().toISOString())
       yield* saveQueue(next)
-      const debugLog = yield* DebugLog
       yield* debugLog.log('queue', 'enqueue', {
         notebookId: target.notebookId,
         requestedDocs: selectedDocs.length,
         plannedUnits: units.length,
         alreadySynced: synced.length,
+        alreadyOnServer,
         changed,
         enqueued: pendingUnits.length,
         pending: next.jobs.length,
