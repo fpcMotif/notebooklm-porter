@@ -34,6 +34,8 @@ export type PorterMessage =
   | { type: 'porter/delete-doc'; docId: string }
   /** Popup requests export of stored docs as downloaded files. */
   | { type: 'porter/export'; docIds: string[]; format: 'markdown' | 'jsonl' }
+  /** Popup requests export of stored docs as an Obsidian-compatible vault folder tree. */
+  | { type: 'porter/export-vault'; docIds: string[] }
   /** Popup queues stored docs for durable background ingest into a notebook. */
   | { type: 'porter/queue-enqueue'; docIds: string[]; target: NotebookTarget }
   /** Popup reads durable ingest progress. */
@@ -78,6 +80,7 @@ export interface PorterResponseMap {
   'porter/list-docs': { docs: SourceDoc[] }
   'porter/delete-doc': {}
   'porter/export': {}
+  'porter/export-vault': {}
   'porter/queue-enqueue': { queue: QueueSnapshot }
   'porter/queue-status': { queue: QueueSnapshot }
   'porter/queue-retry': { queue: QueueSnapshot }
@@ -236,6 +239,10 @@ export function decodePorterMessage(value: unknown): PorterMessage | undefined {
       return docIds !== undefined && (value.format === 'markdown' || value.format === 'jsonl')
         ? { type: value.type, docIds, format: value.format }
         : undefined
+    }
+    case 'porter/export-vault': {
+      const docIds = decodeStringArray(value.docIds)
+      return docIds === undefined ? undefined : { type: value.type, docIds }
     }
     case 'porter/queue-enqueue': {
       const docIds = decodeStringArray(value.docIds)

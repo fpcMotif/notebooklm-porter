@@ -1,5 +1,6 @@
 import { assert, describe, it } from '@effect/vitest'
 import { Effect, Layer } from 'effect'
+import { vi } from 'vitest'
 import { notebookTargetKey } from './accounts/ownership'
 import type { DebugEntry } from './debug'
 import { alarmsTest, debugLogTest, httpTest, identityTest, kvTest, tabsTest } from './fx/testing'
@@ -113,6 +114,22 @@ describe('handlePorterMessage', () => {
         Effect.provide(testLayer({ kv: { 'porter/docs': [docA, docB] } })),
       )
       assert.deepStrictEqual(reply, { ok: true, docs: [docB, docA] })
+    }),
+  )
+
+  it.effect('porter/export-vault only downloads the requested docIds', () =>
+    Effect.gen(function* () {
+      const download = vi.spyOn(browser.downloads, 'download').mockResolvedValue(undefined)
+      const docA = makeDoc({ id: 'reddit:a', capturedAt: '2026-01-01T00:00:00.000Z', title: 'A' })
+      const docB = makeDoc({ id: 'reddit:b', capturedAt: '2026-02-01T00:00:00.000Z', title: 'B' })
+      const reply = yield* handlePorterMessage({
+        type: 'porter/export-vault',
+        docIds: ['reddit:a'],
+      }).pipe(Effect.provide(testLayer({ kv: { 'porter/docs': [docA, docB] } })))
+      assert.deepStrictEqual(reply, { ok: true })
+      assert.strictEqual(download.mock.calls.length, 1)
+      assert.strictEqual(download.mock.calls[0]?.[0]?.filename, 'NotebookLM Porter/reddit/A.md')
+      download.mockRestore()
     }),
   )
 
@@ -912,6 +929,7 @@ describe('domainsForMessage / MESSAGE_DOMAINS', () => {
       'porter/list-docs',
       'porter/delete-doc',
       'porter/export',
+      'porter/export-vault',
       'porter/queue-enqueue',
       'porter/queue-status',
       'porter/queue-retry',

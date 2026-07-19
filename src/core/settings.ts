@@ -27,6 +27,8 @@ export interface PorterSettings {
    * hostname — see `src/core/routing/sticky.ts`.
    */
   stickyRoutes: StickyRouteMap
+  /** When true, every freshly captured doc is immediately exported into the local Obsidian vault folder tree, not just on explicit request. */
+  autoExportVault: boolean
   /** Google OAuth Client ID (Chrome Extension type) for Drive backup. */
   driveClientId?: string
 }
@@ -38,12 +40,14 @@ export const DEFAULT_SETTINGS: PorterSettings = {
   accounts: [],
   notebookTargets: {},
   stickyRoutes: emptyStickyRoutes(),
+  autoExportVault: false,
 }
 
 const SETTING_KEYS = new Set<keyof PorterSettings>([
   'nblmAuthuser',
   'accounts',
   'notebookTargets',
+  'autoExportVault',
   'driveClientId',
 ])
 
@@ -135,7 +139,13 @@ function decodeStickyRoutes(value: unknown): StickyRouteMap {
 }
 
 function emptySettings(): PorterSettings {
-  return { nblmAuthuser: 0, accounts: [], notebookTargets: {}, stickyRoutes: emptyStickyRoutes() }
+  return {
+    nblmAuthuser: 0,
+    accounts: [],
+    notebookTargets: {},
+    stickyRoutes: emptyStickyRoutes(),
+    autoExportVault: false,
+  }
 }
 
 /** Strictly validates a popup-originated partial settings update. */
@@ -164,6 +174,10 @@ export function decodeSettingsPatch(value: unknown): SettingsPatch | undefined {
     if (notebookTargets === undefined) return undefined
     patch.notebookTargets = notebookTargets
   }
+  if (Object.hasOwn(value, 'autoExportVault')) {
+    if (typeof value.autoExportVault !== 'boolean') return undefined
+    patch.autoExportVault = value.autoExportVault
+  }
   if (Object.hasOwn(value, 'driveClientId')) {
     if (typeof value.driveClientId !== 'string') return undefined
     patch.driveClientId = value.driveClientId
@@ -187,11 +201,16 @@ export function decodeStoredSettings(value: unknown): PorterSettings {
   const stickyRoutes = decodeStickyRoutes(
     Object.hasOwn(value, 'stickyRoutes') ? value.stickyRoutes : undefined,
   )
+  const autoExportVault =
+    Object.hasOwn(value, 'autoExportVault') && typeof value.autoExportVault === 'boolean'
+      ? value.autoExportVault
+      : false
   return {
     nblmAuthuser,
     accounts,
     notebookTargets,
     stickyRoutes,
+    autoExportVault,
     ...(Object.hasOwn(value, 'driveClientId') && typeof value.driveClientId === 'string'
       ? { driveClientId: value.driveClientId }
       : {}),

@@ -6,6 +6,11 @@ interface BackupResult {
   isError: boolean
 }
 
+interface ExportVaultResult {
+  text: string
+  isError: boolean
+}
+
 interface NotebookPickerProps {
   hasAccounts: boolean
   notebooks: readonly NotebookMeta[]
@@ -30,9 +35,12 @@ interface NotebookPickerProps {
   backupBusy: boolean
   onBackup: () => void
   backupResult: BackupResult | undefined
+  exportVaultBusy: boolean
+  onExportVault: () => void
+  exportVaultResult: ExportVaultResult | undefined
 }
 
-/** Pick (or create) a notebook target, send captured docs to it, and back them up to Drive. */
+/** Pick (or create) a notebook target, send captured docs to it, and back them up to Drive or export them as an Obsidian vault. */
 export function NotebookPicker({
   hasAccounts,
   notebooks,
@@ -56,6 +64,9 @@ export function NotebookPicker({
   backupBusy,
   onBackup,
   backupResult,
+  exportVaultBusy,
+  onExportVault,
+  exportVaultResult,
 }: NotebookPickerProps) {
   return (
     <>
@@ -158,6 +169,19 @@ export function NotebookPicker({
       {backupResult && (
         <p class={`mt-1 text-xs ${backupResult.isError ? 'text-red-600' : 'text-gray-500'}`}>
           {backupResult.text}
+        </p>
+      )}
+      <button
+        type="button"
+        class="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-gray-700 disabled:opacity-50"
+        disabled={exportVaultBusy}
+        onClick={onExportVault}
+      >
+        {exportVaultBusy ? 'Exporting…' : 'Export vault (.md tree)'}
+      </button>
+      {exportVaultResult && (
+        <p class={`mt-1 text-xs ${exportVaultResult.isError ? 'text-red-600' : 'text-gray-500'}`}>
+          {exportVaultResult.text}
         </p>
       )}
     </>

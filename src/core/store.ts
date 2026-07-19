@@ -2,8 +2,10 @@ import { Effect } from 'effect'
 import type { StorageError } from './fx/errors'
 import { kvSlot } from './fx/kv-slot'
 import { DebugLog, Kv } from './fx/services'
+import { exportVault } from './ingest/vault'
 import type { SourceDoc } from './model/types'
 import { decodeStoredSourceDocs } from './model/codec'
+import { getSettings } from './settings'
 
 /**
  * Capture queue in extension local storage (unlimitedStorage granted).
@@ -37,7 +39,11 @@ export function deleteDoc(docId: string): Effect.Effect<void, StorageError, Kv> 
 /**
  * Persists a freshly captured doc and records a content-free summary in the
  * debug ring — counts and kinds, never titles or bodies — so a copied log
- * shows what capture produced without leaking the captured text.
+ * shows what capture produced without leaking the captured text. When
+ * `autoExportVault` is on, also downloads the doc into the local Obsidian
+ * vault tree — exportVault never fails (per-doc download errors are swallowed
+ * internally), so a broken auto-export can't block the capture itself from
+ * being stored.
  */
 export function storeCapturedDoc(doc: SourceDoc): Effect.Effect<void, StorageError, DebugLog | Kv> {
   return Effect.gen(function* () {
@@ -53,5 +59,7 @@ export function storeCapturedDoc(doc: SourceDoc): Effect.Effect<void, StorageErr
         ? { videoTranscripts: doc.videoDocs.length }
         : {}),
     })
+    const settings = yield* getSettings()
+    if (settings.autoExportVault) yield* exportVault([doc])
   })
 }

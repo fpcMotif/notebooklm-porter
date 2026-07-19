@@ -70,6 +70,9 @@ export interface NotebookWorkspace {
   readonly switchAccount: (authuser: number) => Effect.Effect<void, never, PorterClient>
   readonly createNotebook: () => Effect.Effect<void, never, PorterClient>
   readonly updateDriveClientId: (driveClientId: string) => Effect.Effect<void, never, PorterClient>
+  readonly updateAutoExportVault: (
+    autoExportVault: boolean,
+  ) => Effect.Effect<void, never, PorterClient>
   readonly scanSourceConsole: () => Effect.Effect<void, never, PorterClient>
   readonly removeSourceDuplicates: () => Effect.Effect<void, never, PorterClient>
   readonly retrySource: (sourceId: string) => Effect.Effect<void, never, PorterClient>
@@ -727,6 +730,20 @@ export function makeNotebookWorkspace(): NotebookWorkspace {
             }),
           ),
         )
+      }),
+    updateAutoExportVault: (autoExportVault) =>
+      Effect.gen(function* () {
+        // Optimistic: reflect the toggle immediately, then let the persisted
+        // settings round-trip be the source of truth. Reuses the drive-client-id
+        // preservation so a locally-typed, not-yet-saved Drive id survives.
+        patch({ settings: { ...state.settings, autoExportVault } })
+        const client = yield* PorterClient
+        const result = yield* Effect.result(
+          client.request({ type: 'porter/update-settings', patch: { autoExportVault } }),
+        )
+        if (Result.isSuccess(result)) {
+          patch({ settings: preserveLocalDriveClientId(result.success.settings) })
+        }
       }),
     scanSourceConsole: () =>
       runSourceConsole(

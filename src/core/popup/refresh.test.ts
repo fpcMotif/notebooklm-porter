@@ -180,6 +180,7 @@ describe('popup refresh coordinator', () => {
         accounts: [{ authuser: 0, email: 'stale@example.com' }],
         notebookTargets: { reddit: 'stale-notebook' },
         stickyRoutes: {},
+        autoExportVault: false,
       },
     })
     await firstBootstrap

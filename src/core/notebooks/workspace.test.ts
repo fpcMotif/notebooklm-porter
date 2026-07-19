@@ -55,6 +55,7 @@ function settings(overrides: Partial<PorterSettings> = {}): PorterSettings {
     accounts: [{ ...account0 }, { ...account1 }],
     notebookTargets: {},
     stickyRoutes: {},
+    autoExportVault: false,
     ...overrides,
   }
 }

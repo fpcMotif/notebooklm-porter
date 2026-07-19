@@ -14,6 +14,7 @@ import type { PorterError } from './fx/errors'
 import { Alarms, DebugLog, type Http, type Identity, type Kv, type Tabs } from './fx/services'
 import { formatCapture } from './format/format'
 import { exportDocs } from './ingest/export'
+import { exportVault } from './ingest/vault'
 import { listSources } from './ingest/rpc/client'
 import {
   removeSourceDuplicates,
@@ -67,6 +68,8 @@ export const MESSAGE_DOMAINS: { [K in PorterMessage['type']]: readonly StorageDo
   'porter/list-docs': [],
   'porter/delete-doc': ['docs', 'watches'],
   'porter/export': [],
+  // Downloads only; no local Kv key is mutated.
+  'porter/export-vault': [],
   'porter/queue-enqueue': ['queue', 'settings'],
   'porter/queue-status': ['queue'],
   'porter/queue-retry': ['queue'],
@@ -144,6 +147,13 @@ const handlers: Handlers = {
   'porter/export': (msg) =>
     Effect.gen(function* () {
       yield* exportDocs(msg.docIds, msg.format)
+      return { ok: true as const }
+    }),
+  'porter/export-vault': (msg) =>
+    Effect.gen(function* () {
+      const docs = yield* listDocs()
+      const requested = new Set(msg.docIds)
+      yield* exportVault(docs.filter((doc) => requested.has(doc.id)))
       return { ok: true as const }
     }),
   'porter/queue-enqueue': (msg) =>

@@ -1,5 +1,6 @@
 import { assert, describe, it } from '@effect/vitest'
 import { Effect } from 'effect'
+import { vi } from 'vitest'
 import type { DebugEntry } from './debug'
 import { debugLogTest, kvTest } from './fx/testing'
 import { deleteDoc, listDocs, storeCapturedDoc, upsertDoc } from './store'
@@ -127,5 +128,29 @@ describe('store', () => {
         truncated: false,
       })
     }).pipe(Effect.provide(kvTest())),
+  )
+
+  it.effect('storeCapturedDoc does not auto-export when autoExportVault is off (default)', () =>
+    Effect.gen(function* () {
+      const download = vi.spyOn(browser.downloads, 'download').mockResolvedValue(undefined)
+      const doc = makeDoc({ id: 'a', capturedAt: '2026-01-01T00:00:00.000Z' })
+      yield* storeCapturedDoc(doc).pipe(Effect.provide(debugLogTest()))
+      assert.strictEqual(download.mock.calls.length, 0)
+      download.mockRestore()
+    }).pipe(Effect.provide(kvTest())),
+  )
+
+  it.effect('storeCapturedDoc auto-exports the doc into the vault when autoExportVault is on', () =>
+    Effect.gen(function* () {
+      const download = vi.spyOn(browser.downloads, 'download').mockResolvedValue(undefined)
+      const doc = makeDoc({ id: 'a', capturedAt: '2026-01-01T00:00:00.000Z', title: 'My Thread' })
+      yield* storeCapturedDoc(doc).pipe(Effect.provide(debugLogTest()))
+      assert.strictEqual(download.mock.calls.length, 1)
+      assert.strictEqual(
+        download.mock.calls[0]?.[0]?.filename,
+        'NotebookLM Porter/reddit/My Thread.md',
+      )
+      download.mockRestore()
+    }).pipe(Effect.provide(kvTest({ 'porter/settings': { autoExportVault: true } }))),
   )
 })

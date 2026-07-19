@@ -25,6 +25,9 @@ import { usePopupRefresh } from './usePopupRefresh'
 export function App() {
   const [enrichTranscripts, setEnrichTranscripts] = useState(false)
   const [backupResult, setBackupResult] = useState<{ text: string; isError: boolean } | undefined>()
+  const [exportVaultResult, setExportVaultResult] = useState<
+    { text: string; isError: boolean } | undefined
+  >()
   const [ingestError, setIngestError] = useState<string | undefined>()
   const [watchError, setWatchError] = useState<string | undefined>()
   const { controller: notebookWorkspace, snapshot: workspaceState } = useNotebookWorkspace()
@@ -171,12 +174,34 @@ export function App() {
     }),
   )
 
+  const exportVaultAction = useAction<[]>(() =>
+    Effect.gen(function* () {
+      setExportVaultResult(undefined)
+      const client = yield* PorterClient
+      const result = yield* Effect.result(
+        client.request({ type: 'porter/export-vault', docIds: docs.map((doc) => doc.id) }),
+      )
+      if (Result.isFailure(result)) {
+        setExportVaultResult({ text: result.failure.reason, isError: true })
+        return
+      }
+      setExportVaultResult({
+        text: `${docs.length} doc${docs.length === 1 ? '' : 's'} exported to Downloads/NotebookLM Porter`,
+        isError: false,
+      })
+    }),
+  )
+
   function selectAccount(authuser: number) {
     return popupRuntime.runPromise(notebookWorkspace.switchAccount(authuser))
   }
 
   function updateDriveClientId(driveClientId: string) {
     return popupRuntime.runPromise(notebookWorkspace.updateDriveClientId(driveClientId))
+  }
+
+  function updateAutoExportVault(autoExportVault: boolean) {
+    return popupRuntime.runPromise(notebookWorkspace.updateAutoExportVault(autoExportVault))
   }
 
   return (
@@ -239,6 +264,9 @@ export function App() {
           backupBusy={backupAction.busy}
           onBackup={() => backupAction.run()}
           backupResult={backupResult}
+          exportVaultBusy={exportVaultAction.busy}
+          onExportVault={() => exportVaultAction.run()}
+          exportVaultResult={exportVaultResult}
         />
       )}
       <ConsolePanel
@@ -273,6 +301,14 @@ export function App() {
           <p class="mt-1 text-xs text-gray-400">
             OAuth client (Chrome Extension type) from Google Cloud Console
           </p>
+          <label class="mt-3 flex items-center gap-2 text-gray-700">
+            <input
+              type="checkbox"
+              checked={settings.autoExportVault}
+              onChange={(e) => void updateAutoExportVault(e.currentTarget.checked)}
+            />
+            Auto-export every capture to the Obsidian vault
+          </label>
         </div>
       </details>
       <DebugPanel />
